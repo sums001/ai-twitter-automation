@@ -50,14 +50,14 @@
   "schedule": {
     "windows": [
       [
-        "15:15",
+        "09:00",
         "21:00"
       ]
     ],
     "posts_per_day": [
-      11,
-      11
+      6,
+      6
     ],
-    "min_gap_minutes": 5
+    "min_gap_minutes": 20
   }
 }

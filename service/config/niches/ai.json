@@ -66,12 +66,6 @@
         "machine-learning"
       ],
       "enabled": false
-    },
-    "rss": {
-      "category": "ai",
-      "feeds": [
-        "https://www.artificialintelligence-news.com/feed/"
-      ]
     }
   },
   "persona": {
@@ -87,14 +81,14 @@
   "schedule": {
     "windows": [
       [
-        "15:15",
+        "09:00",
         "21:00"
       ]
     ],
     "posts_per_day": [
-      7,
-      7
+      4,
+      4
     ],
-    "min_gap_minutes": 5
+    "min_gap_minutes": 20
   }
 }

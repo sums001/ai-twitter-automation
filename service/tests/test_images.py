@@ -82,26 +82,45 @@ def test_unsplash_uses_per_workspace_key_over_env(monkeypatch):
     assert seen["key"] == "ws-key"
 
 
-def test_unsplash_broadens_query_on_no_match(monkeypatch):
-    # First (specific) query finds nothing; the broadened fallback succeeds —
-    # so we degrade to a relevant photo instead of dropping the image.
+def test_unsplash_issues_one_query_without_broadening(monkeypatch):
+    # The query is sent verbatim, exactly once — no progressively-broader
+    # fallbacks that would degrade to generic, off-topic stock.
     monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "k")
-    from opensocial.ai.images import ImageResult
 
     tried: list[str] = []
 
     def fake_fetch(self, query, key):
         tried.append(query)
-        # Only the broadest single-word attempt returns a photo.
-        if " " in query:
-            return None
-        return ImageResult(url="https://img/photo.jpg", provider="unsplash")
+        return None  # a no-match must NOT trigger a broadened retry
 
     monkeypatch.setattr(UnsplashProvider, "_fetch", fake_fetch)
-    res = UnsplashProvider().image_for("AI steroid Olympics sparked debate performance")
-    assert res is not None and res.url == "https://img/photo.jpg"
-    assert tried[0] == "AI steroid Olympics sparked debate performance"
-    assert tried[-1] == "AI"
+    assert UnsplashProvider().image_for("openai office building") is None
+    assert tried == ["openai office building"]
+
+
+def test_unsplash_takes_top_relevance_search_result(monkeypatch):
+    # _fetch parses the /search/photos response and returns its top hit.
+    monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "k")
+    import json
+    import io
+
+    captured: dict[str, str] = {}
+
+    def fake_urlopen(req, timeout=10):
+        captured["url"] = req.full_url
+        payload = {
+            "results": [
+                {"urls": {"regular": "https://img/top.jpg"}, "user": {"name": "Ada"}},
+                {"urls": {"regular": "https://img/second.jpg"}},
+            ]
+        }
+        return io.BytesIO(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    res = UnsplashProvider().image_for("city skyline")
+    assert res is not None and res.url == "https://img/top.jpg"
+    assert res.attribution == "Photo by Ada on Unsplash"
+    assert "search/photos" in captured["url"] and "order_by=relevant" in captured["url"]
 
 
 class _RecordingUnsplash(UnsplashProvider):

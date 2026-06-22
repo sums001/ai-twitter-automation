@@ -1,9 +1,9 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Dices, CalendarRange, ChevronRight, X } from 'lucide-react';
+import { Dices, CalendarRange, ChevronRight, X, Globe, Check } from 'lucide-react';
 import { useApp } from '../AppContext';
 import { NICHES, NICHE_COLOR, nicheLabel } from '../data';
 import { api, usePoll } from '../api';
-import { fmtTime, parseTime, timelinePos, isoToMinutes, nowMinutes } from '../utils';
+import { fmtTime, parseTime, timelinePos, isoToMinutesTz, nowMinutesTz } from '../utils';
 import { Card, SectionLabel } from '../components/common';
 
 const LABEL_W = 188;
@@ -164,9 +164,9 @@ function TimeRangeSlider({ lo, hi, step = 15, color = '#3ecf8e', onChange }) {
 // ===========================================================================
 // timeline track (windows + slots + now line) — shared by every lane
 // ===========================================================================
-function Track({ cfg, slots, height = 40 }) {
-  const nowMin = nowMinutes();
-  const slotMins = slots.map(isoToMinutes).sort((a, b) => a - b);
+function Track({ cfg, slots, tz, height = 40 }) {
+  const nowMin = nowMinutesTz(tz);
+  const slotMins = slots.map((s) => isoToMinutesTz(s, tz)).sort((a, b) => a - b);
   const col = cfg.color;
   return (
     <div style={{ position: 'relative', flex: 1, height, background: '#0d1116', border: '1px solid #1a1f27', borderRadius: 8, overflow: 'hidden', opacity: cfg.enabled ? 1 : 0.4 }}>
@@ -196,7 +196,7 @@ function Track({ cfg, slots, height = 40 }) {
 // ===========================================================================
 // collapsed lane row
 // ===========================================================================
-function LaneRow({ cfg, slots, owes, open, dirty, onToggle }) {
+function LaneRow({ cfg, slots, owes, open, dirty, tz, onToggle }) {
   const slotCount = slots.length;
   return (
     <div
@@ -216,7 +216,7 @@ function LaneRow({ cfg, slots, owes, open, dirty, onToggle }) {
           </div>
         </div>
       </div>
-      <Track cfg={cfg} slots={slots} />
+      <Track cfg={cfg} slots={slots} tz={tz} />
       <div style={{ textAlign: 'right', paddingLeft: 12 }}>
         <div className="os-mono" style={{ fontSize: 11, fontWeight: 600, color: cfg.enabled ? '#e7eaef' : '#5b6470' }}>
           {cfg.enabled ? `${slotCount} slot${slotCount === 1 ? '' : 's'}` : 'disabled'}
@@ -426,6 +426,91 @@ function RandomizeModal({ count, onClose, onSubmit }) {
 }
 
 // ===========================================================================
+// timezone picker — windows + slots are interpreted/displayed in this zone
+// ===========================================================================
+function tzOptions() {
+  try {
+    if (typeof Intl.supportedValuesOf === 'function') return Intl.supportedValuesOf('timeZone');
+  } catch { /* older browser */ }
+  return [
+    'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+    'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Africa/Cairo', 'Asia/Kolkata',
+    'Asia/Dubai', 'Asia/Singapore', 'Asia/Tokyo', 'Asia/Shanghai', 'Australia/Sydney',
+  ];
+}
+
+function TimezonePicker({ value, onChange, disabled }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const [busy, setBusy] = useState(false);
+  const zones = useMemo(tzOptions, []);
+  const q = search.trim().toLowerCase().replace(/\s+/g, '_');
+  const opts = zones.filter((z) => !q || z.toLowerCase().includes(q));
+  const rows = [{ z: '', label: 'Server local' }, ...opts.map((z) => ({ z, label: z.replace(/_/g, ' ') }))];
+
+  const pick = async (z) => {
+    if (z === value) { setOpen(false); return; }
+    setBusy(true);
+    try {
+      await onChange(z);
+      setOpen(false);
+      setSearch('');
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ position: 'relative', zIndex: 24 }}>
+      <button
+        onClick={() => !disabled && setOpen((o) => !o)}
+        disabled={disabled}
+        className="hover-border-text"
+        title="Timezone posting windows are interpreted in"
+        style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid #2a313c', background: 'transparent', borderRadius: 9, padding: '8px 12px', cursor: disabled ? 'default' : 'pointer', fontSize: 12, fontWeight: 600, color: '#cfd6df' }}
+      >
+        <Globe size={14} style={{ color: '#5b6470' }} />
+        <span className="os-mono" style={{ fontSize: 11 }}>{value ? value.replace(/_/g, ' ') : 'Server local'}</span>
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+          <div style={{ position: 'absolute', top: 'calc(100% + 5px)', right: 0, zIndex: 41, width: 280, background: '#141922', border: '1px solid #2a313c', borderRadius: 10, boxShadow: '0 12px 36px rgba(0,0,0,.5)', padding: 6 }}>
+            <input
+              autoFocus
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search timezones…"
+              style={{ width: '100%', colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 7, color: '#e7eaef', fontFamily: 'inherit', fontSize: 12, padding: '7px 10px', marginBottom: 5 }}
+            />
+            <div style={{ maxHeight: 300, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 1 }}>
+              {rows.length === 1 && search && <div className="os-mono" style={{ fontSize: 10.5, color: '#5b6470', padding: '10px' }}>no match</div>}
+              {rows.map(({ z, label }) => {
+                const active = z === (value || '');
+                return (
+                  <button
+                    key={z || '_local'}
+                    onClick={() => pick(z)}
+                    disabled={busy}
+                    className="hover-opt"
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', border: 'none', background: active ? 'rgba(62,207,142,.1)' : 'transparent', cursor: busy ? 'default' : 'pointer', padding: '8px 10px', borderRadius: 7, fontSize: 12, color: active ? '#3ecf8e' : '#cfd6df' }}
+                  >
+                    <span style={{ width: 14, flexShrink: 0, display: 'inline-flex' }}>{active && <Check size={13} />}</span>
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ===========================================================================
 // page
 // ===========================================================================
 export default function Schedule() {
@@ -438,6 +523,7 @@ export default function Schedule() {
   const [randomizing, setRandomizing] = useState(false);
 
   const niches = sched ? sched.niches : [];
+  const tzName = (sched && sched.timezone) || ''; // '' = server-local
   const scheduledSlugs = useMemo(() => new Set(niches.map((n) => n.slug)), [niches]);
   // niches not yet on the schedule (NICHES is filled by AppContext; nichesVersion forces refresh)
   const candidates = useMemo(
@@ -520,6 +606,11 @@ export default function Schedule() {
     reload();
   };
 
+  const setTimezone = async (tz) => {
+    await api.put('/api/schedule/timezone', { timezone: tz });
+    reload(); // slots re-resolve in the new zone server-side
+  };
+
   const hours = [];
   for (let h = 0; h <= 24; h += 3) hours.push(h);
 
@@ -535,7 +626,7 @@ export default function Schedule() {
       <Card style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: 22, flexWrap: 'wrap' }}>
         <div>
           <div style={{ fontSize: 15, fontWeight: 700 }}>Today's schedule</div>
-          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>now · {fmtTime(nowMinutes())} · server-local time</div>
+          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>now · {fmtTime(nowMinutesTz(tzName))} · {tzName ? tzName.replace(/_/g, ' ') : 'server-local time'}</div>
         </div>
         <div style={{ display: 'flex', gap: 26, marginLeft: 4 }}>
           <Stat value={totalSlots} label="slots today" color="#e7eaef" />
@@ -543,6 +634,7 @@ export default function Schedule() {
           <Stat value={owedTotal} label="owed" color={owedTotal > 0 ? '#f5a524' : '#3ecf8e'} />
         </div>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <TimezonePicker value={tzName} onChange={setTimezone} disabled={!sched} />
           <button
             onClick={() => setRandomizing(true)}
             disabled={niches.length === 0}
@@ -611,7 +703,7 @@ export default function Schedule() {
               const isOpen = open === n.slug;
               return (
                 <div key={n.slug} style={{ borderRadius: 10, background: isOpen ? 'rgba(255,255,255,.022)' : 'transparent', margin: '0 -8px' }}>
-                  <LaneRow cfg={cfg} slots={n.slots} owes={n.owes} open={isOpen} dirty={!!edits[n.slug]} onToggle={() => setOpen(isOpen ? null : n.slug)} />
+                  <LaneRow cfg={cfg} slots={n.slots} owes={n.owes} open={isOpen} dirty={!!edits[n.slug]} tz={tzName} onToggle={() => setOpen(isOpen ? null : n.slug)} />
                   {isOpen && (
                     <LaneEditor
                       cfg={cfg}

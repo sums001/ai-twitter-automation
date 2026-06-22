@@ -234,6 +234,57 @@ def save_ai_config(session, config: dict, workspace_id: str | None = None) -> di
 
 
 # ---------------------------------------------------------------------------
+# Schedule timezone (global; the niche schedule is a shared catalog)
+# ---------------------------------------------------------------------------
+#
+# Posting windows ("09:00"–"21:00") are interpreted in this timezone, and the
+# dashboard renders today's slots in it. Stored as an IANA name (e.g.
+# "America/New_York") in ``app_settings`` under ``schedule_timezone``; an empty
+# value means the service's own local timezone — the historical behaviour.
+
+
+def resolve_tz(name: str | None):
+    """An IANA name → ``tzinfo``; ``None`` when empty or unknown.
+
+    A ``None`` return tells callers to fall back to the server's local zone, so
+    a missing ``tzdata`` package or a typo degrades gracefully rather than
+    breaking slot resolution.
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(name)
+    except Exception:
+        return None
+
+
+def get_schedule_timezone(session) -> str:
+    """The configured schedule timezone IANA name, or "" for server-local."""
+    from opensocial.core.db import get_app_setting
+
+    return (get_app_setting(session, "schedule_timezone") or "").strip()
+
+
+def set_schedule_timezone(session, name: str | None) -> str:
+    """Validate and persist the schedule timezone (empty clears it to local)."""
+    from opensocial.core.db import set_app_setting
+
+    name = (name or "").strip()
+    if name and resolve_tz(name) is None:
+        raise ValueError(f"unknown timezone {name!r}")
+    set_app_setting(session, "schedule_timezone", name)
+    return name
+
+
+def resolve_schedule_tz(session):
+    """The configured schedule ``tzinfo`` (``None`` = server-local)."""
+    return resolve_tz(get_schedule_timezone(session))
+
+
+# ---------------------------------------------------------------------------
 # Selected niches (the ones the user follows; gates fetch + generation)
 # ---------------------------------------------------------------------------
 

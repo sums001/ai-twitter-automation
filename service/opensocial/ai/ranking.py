@@ -19,13 +19,21 @@ from __future__ import annotations
 
 import re
 
-from opensocial.ai.prompts import build_posttype_messages, build_ranking_messages
+from opensocial.ai.prompts import (
+    build_image_query_messages,
+    build_posttype_messages,
+    build_ranking_messages,
+)
 from opensocial.ai.text import TextProvider
 
 DEFAULT_TOP_K = 12
 _INT_RE = re.compile(r"\d+")
 # A short, comparable label per candidate for the ranking prompt.
 _SUMMARY_CHARS = 200
+# Keep only word characters when cleaning an LLM-written image query, and cap its
+# length so a chatty model reply can't become a long, no-match Unsplash search.
+_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9']+")
+_MAX_QUERY_WORDS = 4
 
 
 def _is_offline(provider: TextProvider) -> bool:
@@ -137,3 +145,45 @@ def choose_post_type(
     except Exception:
         return None
     return _match_choice(reply, choices)
+
+
+def _clean_image_query(reply: str) -> str | None:
+    """Reduce an LLM reply to a tight image query, or ``None`` if unusable.
+
+    Takes the first non-empty line, keeps word tokens only (dropping quotes and
+    punctuation a model might wrap the phrase in), and caps it at
+    ``_MAX_QUERY_WORDS`` so a verbose reply can't become a long, no-match search.
+    """
+    for line in (reply or "").splitlines():
+        words = _QUERY_TOKEN_RE.findall(line)
+        if words:
+            return " ".join(words[:_MAX_QUERY_WORDS])
+    return None
+
+
+def choose_image_query(
+    config: dict,
+    *,
+    text_provider: TextProvider,
+    niche_name: str,
+    subject: str,
+    body: str = "",
+) -> str | None:
+    """Ask the model for a concrete visual Unsplash query, or ``None``.
+
+    Returns ``None`` offline or on any model/parse failure — the caller then
+    falls back to the deterministic :func:`~opensocial.ai.prompts.unsplash_query`
+    heuristic, so a missing or misbehaving model never blocks image attachment.
+    """
+    if _is_offline(text_provider):
+        return None
+
+    name = niche_name or (config or {}).get("display_name") or "this niche"
+    system, user = build_image_query_messages(
+        niche_name=name, subject=subject, body=body
+    )
+    try:
+        reply = text_provider.generate(system, user)
+    except Exception:
+        return None
+    return _clean_image_query(reply)

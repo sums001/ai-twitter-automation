@@ -25,7 +25,11 @@ from sqlalchemy.orm import Session
 
 from opensocial.ai.images import ImageProvider, get_image_provider
 from opensocial.ai.prompts import build_messages, unsplash_query
-from opensocial.ai.ranking import choose_post_type, rerank_by_importance
+from opensocial.ai.ranking import (
+    choose_image_query,
+    choose_post_type,
+    rerank_by_importance,
+)
 from opensocial.ai.text import TextProvider, TextProviderError, get_text_provider
 from opensocial.core.approval import initial_status
 from opensocial.core.config import niche_account_id
@@ -262,6 +266,8 @@ def _attach_image(
     niche_name: str,
     subject: str,
     item_media: list[str] | None,
+    text_provider: TextProvider | None = None,
+    body: str = "",
 ):
     """Resolve an image from the niche's image source.
 
@@ -275,9 +281,17 @@ def _attach_image(
     if getattr(image_provider, "name", "") != "unsplash":
         # Only Unsplash fetches a real image; NoneProvider yields none.
         return None, None, None
-    # Unsplash does keyword search, not prompt interpretation — feed it a clean
-    # niche+keywords query.
-    result = image_provider.image_for(unsplash_query(niche_name=niche_name, subject=subject))
+    # Unsplash searches a stock-photo library, so a concrete visual phrase beats
+    # the raw headline. Let the model write one; fall back to the deterministic
+    # keyword heuristic offline or on failure.
+    query = None
+    if text_provider is not None:
+        query = choose_image_query(
+            {}, text_provider=text_provider,
+            niche_name=niche_name, subject=subject, body=body,
+        )
+    query = query or unsplash_query(niche_name=niche_name, subject=subject)
+    result = image_provider.image_for(query)
     if result is None:
         return None, None, None
     return result.url, result.attribution, result.provider
@@ -362,6 +376,7 @@ def generate_for_niche(
         media_url, attribution, img_provider = _attach_image(
             image_provider, niche_name=niche_name,
             subject=subject, item_media=cand.row.media_urls,
+            text_provider=text_provider, body=body,
         )
 
         if persist:
@@ -451,6 +466,7 @@ def generate_independent(
             media_url, attribution, img_provider = _attach_image(
                 image_provider, niche_name=niche_name,
                 subject=text[:120], item_media=None,
+                text_provider=text_provider,
             )
 
         if persist:

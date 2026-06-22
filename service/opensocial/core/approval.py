@@ -124,6 +124,7 @@ def regenerate(
     media_url, attribution, img_provider = _attach_image(
         image_provider, niche_name=niche_name,
         subject=subject, item_media=item_media,
+        text_provider=text_provider, body=body,
     )
     post.media_url = media_url
     post.media_attribution = attribution

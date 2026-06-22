@@ -33,7 +33,7 @@ from opensocial.core.db import (
     record_post_history,
 )
 from opensocial.core.scheduler import ScheduleConfig, due_slot_count, resolve_slots
-from opensocial.core.settings import Settings
+from opensocial.core.settings import Settings, resolve_schedule_tz
 from opensocial.publish.base import Publisher, estimate_cost, get_publisher
 
 # Statuses a post can be in and still be eligible to publish. With the approval
@@ -263,7 +263,7 @@ def run_due_slots(
         return []  # manual mode never auto-publishes
 
     sched = ScheduleConfig.from_niche(config)
-    slots = resolve_slots(sched, niche_slug, now)
+    slots = resolve_slots(sched, niche_slug, now, tz=resolve_schedule_tz(session))
     target = due_slot_count(slots, now, SLOT_GRACE)
     if target == 0:
         return []

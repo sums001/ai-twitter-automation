@@ -4,9 +4,9 @@
   "enabled": true,
   "persona": {
     "voice": "You are a sharp, no-hype technologist who writes high-signal posts for developers and builders. Dry wit, concrete specifics, zero buzzwords.",
-    "style": "casual",
+    "style": "funny",
     "length": "medium",
-    "instructions": "Write under 280 characters "
+    "instructions": "Write under 280 characters. Write like opinion or take for ragebait but don't give miss-information. The post shouldn't sound like promotion and should be easy to read. try splitting it into multiple lines small lines."
   },
   "ai": {
     "text": {
@@ -50,8 +50,8 @@
   },
   "prioritization": {
     "recency_weight": 0.4,
-    "engagement_weight": 0.25,
-    "relevance_weight": 0.2,
+    "engagement_weight": 1,
+    "relevance_weight": 0.95,
     "sentiment_weight": 0.15,
     "half_life_hours": 24
   },
@@ -79,7 +79,7 @@
     }
   },
   "independent_take": {
-    "enabled": true,
+    "enabled": false,
     "per_day": 1,
     "types": [
       "take"
@@ -146,14 +146,14 @@
   "schedule": {
     "windows": [
       [
-        "15:15",
+        "09:00",
         "21:00"
       ]
     ],
     "posts_per_day": [
-      12,
-      12
+      6,
+      6
     ],
-    "min_gap_minutes": 5
+    "min_gap_minutes": 20
   }
 }

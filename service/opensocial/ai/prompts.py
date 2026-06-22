@@ -229,6 +229,33 @@ def unsplash_query(*, niche_name: str, subject: str, max_words: int = 2) -> str:
     return " ".join(out[:max_words]) or (subject or "").strip()
 
 
+def build_image_query_messages(
+    *, niche_name: str, subject: str, body: str = ""
+) -> tuple[str, str]:
+    """Assemble the ``(system, user)`` prompt for the LLM image-query writer.
+
+    Unsplash searches a *stock photo* library, so the best query names a concrete,
+    photographable scene — not the headline, a brand, or an abstract concept. We
+    ask the model for one short visual phrase that captures the post's topic; the
+    caller (:func:`~opensocial.ai.ranking.choose_image_query`) cleans the reply and
+    falls back to the deterministic :func:`unsplash_query` heuristic offline or on
+    failure.
+    """
+    system = (
+        f"You write image search queries for a stock photo library (Unsplash), "
+        f"for posts in the '{niche_name}' niche.\n"
+        "Given a post topic, return ONE short search query (2-4 words) naming a "
+        "concrete, photographable scene or object that visually represents it.\n"
+        "Use plain visual nouns. Do NOT use brand names, product names, people's "
+        "names, dates, or abstract concepts — they return no good stock photos.\n"
+        "Return ONLY the query words: no quotes, punctuation, or explanation."
+    )
+    user = f"Topic: {subject}"
+    if body:
+        user += f"\n{body.strip()[:200]}"
+    return system, user
+
+
 # One-line description of each tone, for the content-aware post-type picker.
 TONE_GLOSS: dict[str, str] = {
     "news": "a timely, factual development worth reporting",

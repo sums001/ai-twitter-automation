@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, Copy, Check, ExternalLink } from 'lucide-react';
 import { useApp } from '../AppContext';
 import { NICHES, NICHE_COLOR, nicheLabel } from '../data';
 import { api, usePoll } from '../api';
@@ -98,6 +98,27 @@ function QueueCard({ post, reload, maxAttempts }) {
   const [draft, setDraft] = useState(post.text);
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const copyText = () => {
+    const write = navigator.clipboard?.writeText
+      ? navigator.clipboard.writeText(post.text)
+      : Promise.reject();
+    write
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {
+        // Fallback for non-secure contexts where the Clipboard API is unavailable.
+        const ta = document.createElement('textarea');
+        ta.value = post.text;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {}
+        document.body.removeChild(ta);
+      });
+  };
 
   const inflight = (type) =>
     commands.find(
@@ -203,6 +224,32 @@ function QueueCard({ post, reload, maxAttempts }) {
           <span className="os-mono" style={{ fontSize: 10, color: '#7aa2f7' }}>
             {post.scheduled_at ? `→ ${hm(post.scheduled_at)}` : 'unscheduled'}
           </span>
+          {!editing && (
+            <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <button
+                onClick={copyText}
+                className="hover-border-text"
+                title="Copy post text"
+                style={{ ...ghostBtn, display: 'inline-flex', alignItems: 'center', gap: 5, color: copied ? '#3ecf8e' : '#9aa3af' }}
+              >
+                {copied ? <Check size={11} /> : <Copy size={11} />}
+                {copied ? 'copied' : 'copy text'}
+              </button>
+              {post.source_url && (
+                <a
+                  href={post.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover-border-text"
+                  title={post.source_url}
+                  style={{ ...ghostBtn, display: 'inline-flex', alignItems: 'center', gap: 5, textDecoration: 'none' }}
+                >
+                  <ExternalLink size={11} />
+                  source
+                </a>
+              )}
+            </div>
+          )}
           {actionable && !editing && (
             <div onClick={(e) => e.stopPropagation()} style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
               <button

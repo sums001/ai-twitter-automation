@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone, tzinfo
 
 
 @dataclass
@@ -48,28 +48,38 @@ class ScheduleConfig:
 
 
 def _parse_hm(value: str) -> time:
-    hh, mm = value.split(":")
-    return time(int(hh), int(mm))
+    hh, mm = (int(x) for x in value.split(":"))
+    # The dashboard's timeline ends at "24:00" (the right edge), but
+    # ``datetime.time`` tops out at 23:59 — clamp end-of-day to the last
+    # minute so a window ending at midnight resolves instead of crashing.
+    if hh >= 24:
+        return time(23, 59)
+    return time(min(hh, 23), min(mm, 59))
 
 
-def _seed(niche_slug: str, day: datetime) -> int:
-    key = f"{niche_slug}:{day.astimezone().date().isoformat()}"
+def _seed(niche_slug: str, day: datetime, tz: tzinfo | None = None) -> int:
+    key = f"{niche_slug}:{day.astimezone(tz).date().isoformat()}"
     return int(hashlib.sha256(key.encode()).hexdigest(), 16) % (2**32)
 
 
 def resolve_slots(
-    cfg: ScheduleConfig, niche_slug: str, day: datetime | None = None
+    cfg: ScheduleConfig,
+    niche_slug: str,
+    day: datetime | None = None,
+    tz: tzinfo | None = None,
 ) -> list[datetime]:
     """Return today's posting slot times (tz-aware, sorted), stable across ticks.
 
-    Windows are interpreted in the **server's local timezone** — a "09:00"
-    window means 9 AM where the service runs, which is also what the dashboard
-    displays. A deterministic per-day RNG picks the slot count and spreads the
-    slots across the posting windows by bucketing the available time, so slots
-    are naturally spaced and reproducible.
+    Windows are interpreted in ``tz`` — a "09:00" window means 9 AM there, which
+    is also what the dashboard displays. ``tz=None`` falls back to the
+    **server's local timezone** (the historical behaviour). A deterministic
+    per-day RNG picks the slot count and spreads the slots across the posting
+    windows by bucketing the available time, so slots are naturally spaced and
+    reproducible. The per-day seed uses ``tz``'s calendar day, so the slot set
+    rolls over at local midnight in the configured zone.
     """
-    day = (day or datetime.now(timezone.utc)).astimezone()
-    rng = random.Random(_seed(niche_slug, day))
+    day = (day or datetime.now(timezone.utc)).astimezone(tz)
+    rng = random.Random(_seed(niche_slug, day, tz))
 
     # Build concrete (start, end) datetime windows for this calendar day.
     base = day.replace(hour=0, minute=0, second=0, microsecond=0)

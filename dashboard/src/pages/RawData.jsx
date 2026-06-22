@@ -123,6 +123,33 @@ function Field({ label, children, mono = true }) {
   );
 }
 
+// A rendered thumbnail for the entry's featured image. Picks the first
+// http(s) URL in media_urls and hides itself if that URL doesn't actually load
+// as an image (e.g. NASA video-day links or YouTube page URLs), so it degrades
+// to just the MEDIA URLS list below.
+function EntryImage({ urls }) {
+  const candidate = (urls || []).find((u) => typeof u === 'string' && /^https?:\/\//i.test(u));
+  const [failed, setFailed] = useState(false);
+  if (!candidate || failed) return null;
+  return (
+    <div style={{ marginTop: 10 }}>
+      <SectionLabel style={{ marginBottom: 6 }}>FEATURED IMAGE</SectionLabel>
+      <a href={candidate} target="_blank" rel="noreferrer" style={{ display: 'inline-block', lineHeight: 0 }}>
+        <img
+          src={candidate}
+          alt=""
+          loading="lazy"
+          onError={() => setFailed(true)}
+          style={{
+            maxWidth: 280, maxHeight: 200, width: 'auto', height: 'auto', objectFit: 'cover',
+            borderRadius: 8, border: '1px solid #1c212a', display: 'block',
+          }}
+        />
+      </a>
+    </div>
+  );
+}
+
 function JsonBlock({ value }) {
   if (value == null || (typeof value === 'object' && !Object.keys(value).length)) return null;
   return (
@@ -215,6 +242,7 @@ function ItemRow({ item, open, onToggle }) {
             {item.body ? (item.body.length > 1200 ? item.body.slice(0, 1200) + ' …' : item.body) : null}
           </Field>
 
+          <EntryImage urls={item.media_urls} />
           {(item.media_urls || []).length > 0 && (
             <div style={{ marginTop: 10 }}>
               <SectionLabel style={{ marginBottom: 6 }}>MEDIA URLS</SectionLabel>

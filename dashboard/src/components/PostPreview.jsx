@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { MessageCircle, Repeat2, Heart, BarChart2, Bookmark, Share, MoreHorizontal, X } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { MessageCircle, Repeat2, Heart, BarChart2, Bookmark, Share, MoreHorizontal, X, Copy, Check, ExternalLink } from 'lucide-react';
 import { NICHE_COLOR, nicheLabel } from '../data';
 import { ago } from '../utils';
 
@@ -32,11 +32,28 @@ function ActionIcon({ icon: Icon, label, color = '#71767b', hover }) {
 }
 
 export default function PostPreview({ post, onClose }) {
+  const [copied, setCopied] = useState(false);
+
   useEffect(() => {
     const onKey = (e) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  const copyText = () => {
+    const text = post?.text || '';
+    const write = navigator.clipboard?.writeText ? navigator.clipboard.writeText(text) : Promise.reject();
+    write
+      .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })
+      .catch(() => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {}
+        document.body.removeChild(ta);
+      });
+  };
 
   if (!post) return null;
   const color = NICHE_COLOR[post.niche] || '#7a828f';
@@ -147,6 +164,36 @@ export default function PostPreview({ post, onClose }) {
         >
           <span className="os-mono" style={{ fontSize: 10, color: '#71767b', textTransform: 'capitalize' }}>{post.type}</span>
           <span className="os-mono" style={{ fontSize: 10, color: '#71767b' }}>{post.status?.replace('_', ' ')}</span>
+          <button
+            onClick={copyText}
+            title="Copy post text"
+            className="os-mono"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 5, background: 'transparent',
+              border: '1px solid #2f3336', borderRadius: 7, cursor: 'pointer', padding: '4px 9px',
+              fontSize: 10, color: copied ? '#00ba7c' : '#71767b',
+            }}
+          >
+            {copied ? <Check size={11} /> : <Copy size={11} />}
+            {copied ? 'copied' : 'copy text'}
+          </button>
+          {post.source_url && (
+            <a
+              href={post.source_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={post.source_url}
+              className="os-mono"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5, textDecoration: 'none',
+                border: '1px solid #2f3336', borderRadius: 7, padding: '4px 9px',
+                fontSize: 10, color: '#71767b',
+              }}
+            >
+              <ExternalLink size={11} />
+              source
+            </a>
+          )}
           <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: overLimit ? '#f5455c' : '#71767b' }}>
             {(post.text || '').length}/280
           </span>

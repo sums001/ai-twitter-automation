@@ -314,10 +314,11 @@ def _do_regenerate(session_factory, config_dir: str, post_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _window_for_niches(niches, now):
+def _window_for_niches(niches, now, tz=None):
     """Posting window (first, last) across a list of scheduled niches today.
 
-    ``(None, None)`` when none are scheduled. Both tz-aware, server-local.
+    ``(None, None)`` when none are scheduled. Both tz-aware; windows are
+    interpreted in ``tz`` (``None`` = server-local).
     """
     from opensocial.core.scheduler import ScheduleConfig, resolve_slots
 
@@ -325,7 +326,9 @@ def _window_for_niches(niches, now):
     for niche in niches:
         if not niche.enabled:
             continue
-        slots = resolve_slots(ScheduleConfig.from_niche(niche.raw), niche.slug, now)
+        slots = resolve_slots(
+            ScheduleConfig.from_niche(niche.raw), niche.slug, now, tz=tz
+        )
         if not slots:
             continue
         if first is None or slots[0] < first:
@@ -364,10 +367,11 @@ def autopilot_refresh(
     from datetime import datetime, timedelta, timezone
 
     from opensocial.core.db import get_app_setting, set_app_setting
-    from opensocial.core.settings import resolve_settings
+    from opensocial.core.settings import resolve_schedule_tz, resolve_settings
 
     with session_factory() as s:
         x_min = int(resolve_settings(s, None).autopilot_fetch_minutes)
+        tz = resolve_schedule_tz(s)
     if x_min <= 0:
         return None
 
@@ -382,14 +386,14 @@ def autopilot_refresh(
         for wid in auto_ids
         for n in _workspace_niches(session_factory, config_dir, wid, None)
     ]
-    first, last = _window_for_niches(auto_niches, now)
+    first, last = _window_for_niches(auto_niches, now, tz=tz)
     if first is None:
         return None
 
     x = timedelta(minutes=x_min)
     window_start = first - x  # warm-up before the first post
     window_end = last - x  # last fetch precedes the last post by X
-    now_local = now.astimezone()
+    now_local = now.astimezone(tz)
     if now_local < window_start or now_local > window_end:
         return None
 

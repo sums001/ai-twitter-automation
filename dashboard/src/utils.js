@@ -19,6 +19,29 @@ export function isoToMinutes(iso) {
   return d.getHours() * 60 + d.getMinutes();
 }
 
+// Minutes since midnight for an ISO timestamp, rendered in an IANA timezone.
+// Falls back to the browser-local clock when `tz` is empty/unset, so the
+// schedule view stays correct whether or not a timezone is configured.
+export function isoToMinutesTz(iso, tz) {
+  if (!tz) return isoToMinutes(iso);
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(new Date(iso));
+    const h = (+parts.find((p) => p.type === 'hour').value) % 24; // 24:xx → 00:xx
+    const m = +parts.find((p) => p.type === 'minute').value;
+    return h * 60 + m;
+  } catch {
+    return isoToMinutes(iso);
+  }
+}
+
+// Current minutes since midnight in an IANA timezone (browser-local if unset).
+export function nowMinutesTz(tz) {
+  if (!tz) return nowMinutes();
+  return isoToMinutesTz(new Date().toISOString(), tz);
+}
+
 // "HH:MM" local clock for an ISO timestamp.
 export function hm(iso) {
   if (!iso) return null;

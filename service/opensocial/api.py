@@ -56,12 +56,15 @@ from opensocial.core.db import (
 from opensocial.core.scheduler import ScheduleConfig, resolve_slots
 from opensocial.core.settings import (
     get_followed_niches,
+    get_schedule_timezone,
     get_scoped_setting,
     has_scoped_secret,
     load_ai_config,
     resolve_settings,
+    resolve_tz,
     save_ai_config,
     set_followed_niches,
+    set_schedule_timezone,
     set_scoped_secret,
     set_scoped_setting,
 )
@@ -359,6 +362,10 @@ class RandomizeIn(BaseModel):
     window: list[str]  # ["HH:MM", "HH:MM"] — posting time range for the day
     total_posts: int  # total posts/day, split randomly across scheduled niches
     min_gap_minutes: int | None = None
+
+
+class TimezonePut(BaseModel):
+    timezone: str = ""  # IANA name (e.g. "America/New_York"); "" = server-local
 
 
 # ---------------------------------------------------------------------------
@@ -786,12 +793,31 @@ def create_app(
 
     # ---- schedule (resolved slots) ------------------------------------------
 
+    @app.get("/api/schedule/timezone")
+    def get_timezone():
+        """The schedule timezone (IANA name; "" means the server's local zone)."""
+        with session_factory() as s:
+            return {"timezone": get_schedule_timezone(s)}
+
+    @app.put("/api/schedule/timezone")
+    def put_timezone(body: TimezonePut):
+        """Set the timezone posting windows are interpreted/displayed in."""
+        with session_factory() as s:
+            try:
+                tz = set_schedule_timezone(s, body.timezone)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+            s.commit()
+        return {"timezone": tz}
+
     @app.get("/api/schedule")
     def schedule(account: str | None = None):
         now = datetime.now(timezone.utc)
         out = []
         scoped = account_niche_slugs(account)  # this workspace's followed niches
         with session_factory() as s:
+            tz_name = get_schedule_timezone(s)
+            tz = resolve_tz(tz_name)
             for n in niches():
                 # Only niches that have a schedule block are "on the schedule".
                 if not (n.raw or {}).get("schedule"):
@@ -800,7 +826,7 @@ def create_app(
                 if scoped is not None and n.slug not in scoped:
                     continue
                 cfg = ScheduleConfig.from_niche(n.raw)
-                slots = resolve_slots(cfg, n.slug, now)
+                slots = resolve_slots(cfg, n.slug, now, tz=tz)
                 # "due" here is purely informational for the schedule view: how
                 # many of today's slots have elapsed (the engine no longer catches
                 # these up — only slots that *just* came due publish).
@@ -825,7 +851,7 @@ def create_app(
                         "owes": max(0, due - published) if n.enabled else 0,
                     }
                 )
-        return {"now": _iso(now), "niches": out}
+        return {"now": _iso(now), "timezone": tz_name, "niches": out}
 
     # ---- posts (queue) -------------------------------------------------------
 
@@ -837,7 +863,9 @@ def create_app(
         limit: int = 200,
     ):
         stmt = (
-            select(GeneratedPost, ContentItemRow.source_name)
+            select(
+                GeneratedPost, ContentItemRow.source_name, ContentItemRow.url
+            )
             .join(
                 ContentItemRow,
                 GeneratedPost.content_item_id == ContentItemRow.id,
@@ -866,13 +894,14 @@ def create_app(
                     "priority": p.priority_score,
                     "media_url": p.media_url,
                     "source": source_name,
+                    "source_url": source_url,
                     "independent": p.content_item_id is None,
                     "attempts": p.post_attempts,
                     "error": p.post_error,
                     "created_at": _iso(p.created_at),
                     "scheduled_at": _iso(p.scheduled_at),
                 }
-                for p, source_name in rows
+                for p, source_name, source_url in rows
             ]
 
     def _post_or_404(s, post_id: str) -> GeneratedPost:

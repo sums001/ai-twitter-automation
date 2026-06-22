@@ -13,6 +13,7 @@ litellm>=1.40
 APScheduler>=3.10           # scheduler loop
 tweepy>=4.14                # X publisher (lazy-imported)
 cryptography>=42.0          # Fernet-encrypted credentials at rest
+tzdata>=2024.1              # IANA timezone DB for zoneinfo (Windows has none)
 
 # Dashboard API (Phase 6)
 fastapi>=0.115
