@@ -61,9 +61,16 @@ python main.py post-now <generated_post_id>
 python main.py sources                   # list registered source plugins
 
 pytest                                   # run the test suite
+pytest tests/test_filtering.py -k near_dup   # single file / single test
 ```
 
-Dashboard: `cd dashboard && npm install && npm run dev`.
+Dashboard: `cd dashboard && npm install && npm run dev` (Vite on `127.0.0.1:5174`, proxies `/api` to the service on `127.0.0.1:8765`; `npm run build` for production). There is no linter or dashboard test setup.
+
+One-command bootstrap from the repo root: `python setup.py` creates `service/.venv`, installs deps, and runs `serve` + the Vite dev server together.
+
+## Architecture: Workspaces
+
+A **workspace = one X account** (`PlatformAccount`). Niches are a *shared catalog*; a workspace *follows* niches and its drafts/history are isolated by `GeneratedPost.platform_account_id`. Per-workspace settings live in `app_settings` under `ws:<workspace_id>:*` keys (dry_run, app_mode, AI config, followed niches, secrets), with a legacy global-key fallback. Niche JSON can carry an `account_id` owner. Anything touching posts, settings, or throttling (e.g. the min-gap check) must be scoped to the workspace; see `delete_workspace` / `reset_workspace` in `core/db.py` and `tests/test_workspaces.py` for the isolation rules. `ensure_default_workspace` guarantees at least one exists.
 
 ## Conventions & Gotchas
 
@@ -72,4 +79,4 @@ Dashboard: `cd dashboard && npm install && npm run dev`.
 - **No AI image generation.** Pollinations/DALL·E were removed; images come only from Unsplash, the source item's own media (`image_source: content`), or none. Some niche JSON still carries a stale `ai.image` block — the per-niche `image_source` field is what's read.
 - **Sources removed:** GDELT and Finnhub. Their files may still be tracked but are deleted in the working tree; don't reintroduce them. Google News RSS replaced GDELT as the universal feed.
 - **One bad source never sinks a run** — fetch catches per-source exceptions. Keep that pattern when adding sources.
-- Platform: Windows, PowerShell primary shell. Run service commands from the `service/` directory.
+- Primary dev platform is Windows/PowerShell (the `tzdata` dependency exists for that); macOS also works. Run service commands from the `service/` directory.
