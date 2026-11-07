@@ -62,6 +62,14 @@
       ],
       "sort": "hot",
       "limit": 15
+    },
+    "rss": {
+      "category": "crypto",
+      "feeds": [
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://decrypt.co/feed",
+        "https://www.theblock.co/rss.xml"
+      ]
     }
   },
   "persona": {

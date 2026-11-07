@@ -59,31 +59,30 @@ Every source plugin returns content normalized into a common "content item" shap
 
 AI generation always works from this normalized item — it never needs to know which source it came from.
 
-**Field availability varies by source.** Full `body` text is available from Reddit, YouTube (via transcript), Medium/Decrypt/The Block/YC Blog (via `content:encoded`), Dev.to, GitHub Releases, and the Guardian; the rest (Google News, CoinDesk, Reuters/MarketWatch, WHO, Nature/PhysOrg/Futurism, HBR, ArXiv, yfinance, ProductHunt, NASA) only provide a `summary`/excerpt — so the standard fallback is `content_for_ai = item.body or item.summary or item.title`. No shipped source currently populates `sentiment`, so it stays null and the prioritization blend redistributes its weight when no `sentiment_target` is set. `engagement` is a flexible JSON dict whose shape differs per source (Reddit: score/comments/upvote_ratio; YouTube: views/likes/comments; Hacker News: score/comments; Dev.to: reactions/comments/reading_time; ProductHunt: votes/comments; GitHub Releases: downloads) — most RSS-based sources leave it null. `language` is rarely provided per item (the Guardian is an exception) and otherwise defaults to `en`.
+**Field availability varies by source.** Full `body` text is available from Reddit, YouTube (via transcript), Medium and most `content:encoded` feeds (Decrypt, YC Blog, Ars Technica, Futurism, Nature, Phys.org, ScienceDaily, WHO), Dev.to, and the Guardian; the rest (Google News, CoinDesk, The Block, MarketWatch, CNBC, HBR, Fast Company, Fortune, Entrepreneur, ArXiv abstracts, yfinance) only provide a `summary`/excerpt — so the standard fallback is `content_for_ai = item.body or item.summary or item.title`. No shipped source currently populates `sentiment`, so it stays null and the prioritization blend redistributes its weight when no `sentiment_target` is set. `engagement` is a flexible JSON dict whose shape differs per source (YouTube: views/likes/comments; Hacker News: score/comments; Dev.to: reactions/comments/reading_time) — Reddit (public RSS) and the RSS-based sources leave it empty. `language` is rarely provided per item (the Guardian is an exception) and otherwise defaults to `en`.
 
 ---
 
 ## Content Sources
 
-13 source plugins ship, registered via `@register` on the `Source` ABC (`opensocial/sources/`). The generic `rss` plugin is reused across many feeds, so the per-niche source list covers far more outlets than there are plugins (Decrypt, CoinDesk, The Block, Reuters/MarketWatch, WHO, Nature/PhysOrg/Futurism, HBR, Indie Hackers, YC Blog, TechCrunch, Ars Technica, … are all `rss` feeds configured per niche).
+10 source plugins ship, registered via `@register` on the `Source` ABC (`opensocial/sources/`). Each plugin also describes itself on its class — `label`, `description`, `auth` (`none` / `optional` / `required`), `key_envs`, `key_help`, the niche-config `settings` it reads, and (for user-fed sources) an origin spec. The dashboard API, the credentials list and the fetch runner read only these attributes. The generic `rss` plugin is reused across many feeds, so the per-niche source list covers far more outlets than there are plugins (TechCrunch, Ars Technica, Futurism, CoinDesk, Decrypt, The Block, MarketWatch, CNBC, HBR, Fast Company, Fortune, Entrepreneur, YC Blog, Nature, Phys.org, ScienceDaily, WHO are all `rss` feeds configured per niche).
 
 | Plugin | Source | Auth |
 |---|---|---|
 | `googlenews` | Google News RSS — global news/trend feed via per-query search RSS | none |
 | `rss` | Generic RSS/Atom parser, reused for most feed-based outlets | none |
-| `reddit` | Reddit (public `.json` endpoints via httpx) | none |
+| `reddit` | Reddit (public `.rss` Atom feeds; `.json` is blocked unauthenticated) | none |
 | `youtube` | YouTube Data API (with transcripts) | API key |
 | `medium` | Medium RSS (by tag/category) | none |
 | `hackernews` | Hacker News API | none |
 | `devto` | Dev.to API | none |
-| `github_releases` | GitHub Releases (GitHub REST API) | optional token |
 | `arxiv` | ArXiv API | none |
-| `producthunt` | Product Hunt API | API access |
-| `nasa` | NASA API | API key (DEMO_KEY works) |
 | `guardian` | The Guardian API | API key |
 | `yfinance` | Yahoo Finance / yfinance (unofficial) | none |
 
-**Removed:** GDELT (its DOC 2.0 API rate-limited at 1 req/5s and starved most niches — replaced by Google News) and Finnhub. Don't reintroduce them.
+**Removed:** GDELT (its DOC 2.0 API rate-limited at 1 req/5s and starved most niches — replaced by Google News), Finnhub, Product Hunt (token-only, commercial-use restrictions), GitHub Releases, and NASA APOD (its `count` mode returns random archive entries that the age filter always dropped). Don't reintroduce them.
+
+A fetch that runs nothing reports why (source turned off, required key missing, no followed niche) as a failed command, so the dashboard toast shows the reason. Sources with `auth = required` and no key are skipped up front rather than attempted and recorded as errors.
 
 ---
 

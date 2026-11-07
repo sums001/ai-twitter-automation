@@ -104,14 +104,6 @@
       "limit": 15,
       "full_text": false
     },
-    "github_releases": {
-      "repos": [
-        "python/cpython",
-        "openai/openai-python",
-        "langchain-ai/langchain"
-      ],
-      "limit": 5
-    },
     "arxiv": {
       "query": "cat:cs.AI OR cat:cs.LG",
       "limit": 20
@@ -124,10 +116,6 @@
       ],
       "enabled": false
     },
-    "producthunt": {
-      "enabled": true,
-      "limit": 20
-    },
     "youtube": {
       "enabled": false,
       "query": "ai news",
@@ -138,7 +126,8 @@
       "category": "tech",
       "feeds": [
         "https://techcrunch.com/feed/",
-        "https://feeds.arstechnica.com/arstechnica/index"
+        "https://feeds.arstechnica.com/arstechnica/index",
+        "https://futurism.com/feed"
       ]
     }
   },

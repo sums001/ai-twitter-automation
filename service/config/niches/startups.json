@@ -49,9 +49,11 @@
       ],
       "enabled": false
     },
-    "producthunt": {
-      "enabled": true,
-      "limit": 20
+    "rss": {
+      "category": "startups",
+      "feeds": [
+        "https://www.ycombinator.com/blog/rss/"
+      ]
     }
   }
 }

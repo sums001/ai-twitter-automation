@@ -14,104 +14,16 @@ const inputStyle = {
 };
 const block = { background: '#0d1116', border: '1px solid #171c24', borderRadius: 11, padding: '14px 16px' };
 
-// Mirrors the backend's ORIGIN_SPEC keys; used to classify dynamic sources if
-// the running service is too old to send the `kind` field.
-const DYNAMIC_IDS = ['rss', 'reddit', 'youtube'];
-const MAX_ORIGINS = 20; // fallback if the service doesn't send max_origins
-
-// How each source turns its input into post drafts — surfaced via the ⓘ button.
-// `input` = what you provide · `scans` = what it fetches · `builds` = how posts
-// are made. Static sources run on each niche's own config; dynamic ones you feed.
-const SOURCE_INFO = {
-  reddit: {
-    input: 'You add subreddits (paste a URL or just r/name).',
-    scans: "Reads each subreddit's hot posts — title, self-text, score & comment counts.",
-    builds: 'High-signal threads are written up into post drafts.',
-  },
-  youtube: {
-    input: 'You add channels (a /channel/UC… URL works best).',
-    scans: 'Lists each channel’s newest uploads, then pulls the full video transcript + view/like stats.',
-    builds: 'The transcript is summarized into post drafts about the video.',
-  },
-  rss: {
-    input: 'You add RSS / Atom feed URLs.',
-    scans: 'Reads each feed’s newest entries — title plus summary/content.',
-    builds: 'Fresh articles become post drafts.',
-  },
-  hackernews: {
-    input: 'Runs automatically on each niche’s keywords (no setup).',
-    scans: 'Searches Hacker News (Algolia) for matching or front-page stories with discussion.',
-    builds: 'Top stories become drafts.',
-  },
-  googlenews: {
-    input: 'Runs on each niche’s search query.',
-    scans: 'Reads Google News search RSS for recent headlines and the outlet.',
-    builds: 'Recent news becomes drafts.',
-  },
-  arxiv: {
-    input: 'Runs on each niche’s arXiv query (categories like cs.AI).',
-    scans: 'Fetches recent papers — title and abstract.',
-    builds: 'New papers become drafts.',
-  },
-  nasa: {
-    input: 'No setup needed.',
-    scans: 'Pulls recent Astronomy Picture of the Day entries with their imagery.',
-    builds: 'Each APOD becomes an image-led draft.',
-  },
-  guardian: {
-    input: 'Runs on each niche’s section / query.',
-    scans: 'Queries The Guardian Content API for recent articles.',
-    builds: 'Articles become drafts.',
-  },
-  medium: {
-    input: 'Runs on each niche’s Medium tags.',
-    scans: 'Reads Medium tag RSS feeds — title and summary.',
-    builds: 'Recent posts become drafts.',
-  },
-  devto: {
-    input: 'Runs on each niche’s dev.to tag.',
-    scans: 'Reads the Forem API for recent articles (optionally the full body).',
-    builds: 'Articles become drafts.',
-  },
-  github_releases: {
-    input: 'Tracks each niche’s repos (owner/repo).',
-    scans: 'Reads each repo’s latest releases — tag and release notes.',
-    builds: 'New releases become drafts.',
-  },
-  producthunt: {
-    input: 'No origin setup needed.',
-    scans: 'Pulls trending products from Product Hunt (GraphQL API).',
-    builds: 'Each launch becomes a draft.',
-  },
-  yfinance: {
-    input: 'Tracks each niche’s symbols (AAPL, BTC-USD…).',
-    scans: 'Pulls Yahoo Finance news for every tracked symbol.',
-    builds: 'Market news becomes drafts.',
-  },
-};
-
-const KEY_NOTE = {
-  reddit: 'Needs a Reddit app client id + secret.',
-  youtube: 'Needs a YouTube Data API key.',
-  guardian: 'Needs a free Guardian API key.',
-  producthunt: 'Needs a Product Hunt developer token.',
-  github_releases: 'Optional GitHub token raises rate limits.',
-  nasa: 'Optional NASA key (else the shared DEMO_KEY rate-limits).',
-};
+// Fallback cap if the service doesn't send max_origins.
+const MAX_ORIGINS = 20;
 
 // ===========================================================================
 // "how it works" popover (anchored under the ⓘ button)
 // ===========================================================================
 function InfoPopover({ src }) {
   const [open, setOpen] = useState(false);
-  const info = SOURCE_INFO[src.id];
-  if (!info) return null;
-  const step = (label, text, color) => (
-    <div style={{ display: 'flex', gap: 9 }}>
-      <span className="os-mono" style={{ width: 44, flexShrink: 0, fontSize: 8.5, fontWeight: 700, color, letterSpacing: '.4px', paddingTop: 2 }}>{label}</span>
-      <span style={{ fontSize: 11.5, color: '#cfd6df', lineHeight: 1.5 }}>{text}</span>
-    </div>
-  );
+  if (!src.description) return null;
+  const settings = src.settings || [];
   return (
     <span style={{ position: 'relative', display: 'inline-flex' }}>
       <button
@@ -134,14 +46,21 @@ function InfoPopover({ src }) {
               <span style={{ display: 'inline-flex', color: '#3ecf8e' }}><Cog size={14} /></span>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: '#fff' }}>How {src.name} works</span>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-              {step('INPUT', info.input, '#7aa2f7')}
-              {step('SCANS', info.scans, '#f5a524')}
-              {step('BUILDS', info.builds, '#3ecf8e')}
-            </div>
-            {src.key && KEY_NOTE[src.id] && (
-              <div className="os-mono" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 9.5, color: '#9aa3af', marginTop: 12, paddingTop: 10, borderTop: '1px solid #232b35' }}>
-                <KeyRound size={12} style={{ flexShrink: 0 }} />{KEY_NOTE[src.id]}
+            <div style={{ fontSize: 11.5, color: '#cfd6df', lineHeight: 1.5 }}>{src.description}</div>
+            {settings.length > 0 && (
+              <div style={{ marginTop: 11 }}>
+                <div className="os-mono" style={{ fontSize: 8.5, fontWeight: 700, color: '#7aa2f7', letterSpacing: '.4px', marginBottom: 5 }}>PER-NICHE SETTINGS</div>
+                {settings.map((st) => (
+                  <div key={st.name} style={{ display: 'flex', gap: 8, fontSize: 10.5, lineHeight: 1.5 }}>
+                    <span className="os-mono" style={{ width: 92, flexShrink: 0, color: '#e7eaef' }}>{st.name}</span>
+                    <span style={{ color: '#9aa3af' }}>{st.help}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {src.key_help && (
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, fontSize: 10.5, color: '#9aa3af', lineHeight: 1.5, marginTop: 12, paddingTop: 10, borderTop: '1px solid #232b35' }}>
+                <KeyRound size={12} style={{ flexShrink: 0, marginTop: 2 }} />{src.key_help}
               </div>
             )}
           </div>
@@ -418,8 +337,8 @@ function SourceRow({ src, open, onToggle, onFetch, onToggleEnabled, fetching }) 
             )}
             <span className="os-mono" style={{ fontSize: 8.5, padding: '2px 6px', borderRadius: 5, ...badge.style }}>{badge.text}</span>
           </div>
-          <div className="os-mono" style={{ fontSize: 9, color: '#5b6470', marginTop: 2 }}>
-            {isDynamic ? 'dynamic' : 'static'}{src.category ? ` · ${src.category}` : ''}
+          <div style={{ fontSize: 10, color: '#5b6470', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={src.description}>
+            {src.description}
           </div>
         </div>
       </div>
@@ -498,11 +417,11 @@ function SourceEditor({ src, niches, keySet, reload, reloadCreds }) {
             </>
           ) : (
             <>
-              <SectionLabel style={{ fontSize: 10, marginBottom: 10 }}>FEEDS NICHES</SectionLabel>
+              <SectionLabel style={{ fontSize: 10, marginBottom: 10 }}>USED BY NICHES</SectionLabel>
               <NicheChips niches={uniqueNiches} max={50} />
               <div className="os-mono" style={{ fontSize: 9.5, color: '#4b5563', marginTop: 12, lineHeight: 1.6 }}>
-                A static source has a fixed origin and runs for every niche that references it.
-                Niches reference it from Settings → Niches → Sources.
+                Runs for every niche that lists it, using that niche's own settings
+                (see ⓘ for what each setting does).
               </div>
             </>
           )}
@@ -531,7 +450,7 @@ export default function Sources() {
   const { data: creds, reload: reloadCreds } = usePoll('/api/credentials', 30000);
 
   const [open, setOpen] = useState(null);
-  const [filter, setFilter] = useState('all'); // all | static | dynamic
+  const [filter, setFilter] = useState('all'); // all | free | keyed
   const [query, setQuery] = useState('');
   const [selectedOnly, setSelectedOnly] = useState(true); // hide sources that don't support a selected niche
 
@@ -554,9 +473,10 @@ export default function Sources() {
     return m;
   }, [creds]);
 
-  const isDynamic = (s) => (s.kind ? s.kind === 'dynamic' : DYNAMIC_IDS.includes(s.id));
-  // normalize kind so downstream uses src.kind reliably
-  const normalized = list.map((s) => ({ ...s, kind: isDynamic(s) ? 'dynamic' : 'static' }));
+  const normalized = list;
+  // "free" = fetches without a key (an optional key only lifts rate limits).
+  const needsKeyGroup = (s) => s.auth === 'required';
+  const inFilter = (s) => filter === 'all' || (filter === 'keyed' ? needsKeyGroup(s) : !needsKeyGroup(s));
 
   const fetchingId = (id) =>
     commands.find((c) => c.type === 'fetch_sources' && c.payload.source === id && (c.status === 'pending' || c.status === 'running'));
@@ -568,7 +488,7 @@ export default function Sources() {
   // otherwise a fresh DB (nothing selected) would hide every static source.
   const applySelected = selectedOnly && selectedSet.size > 0;
   const visible = normalized
-    .filter((s) => filter === 'all' || s.kind === filter)
+    .filter(inFilter)
     .filter((s) => !applySelected || supportsSelected(s))
     .filter((s) => !query || s.name.toLowerCase().includes(query.toLowerCase()) || s.id.toLowerCase().includes(query.toLowerCase()));
   const hiddenBySelected = applySelected
@@ -578,7 +498,7 @@ export default function Sources() {
   const total = normalized.length;
   const active = normalized.filter((s) => s.enabled).length;
   const originsTotal = normalized.reduce((a, s) => a + (s.origins || []).length, 0);
-  const missingKeys = normalized.filter((s) => s.key === 'required' && !s.key_set && !s.upcoming).length;
+  const missingKeys = normalized.filter((s) => s.needs_key && !s.upcoming).length;
 
   const seg = (id, label, count) => (
     <button
@@ -601,7 +521,7 @@ export default function Sources() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 22, flexWrap: 'wrap', padding: '16px 0', borderBottom: '1px solid #1a1f27' }}>
         <div>
           <div style={{ fontSize: 15, fontWeight: 700 }}>Content sources</div>
-          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>static &amp; dynamic ingestion · click a row to configure</div>
+          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>where post material comes from · click a row to configure</div>
         </div>
         <div style={{ display: 'flex', gap: 26, marginLeft: 4 }}>
           <Stat value={active} label={`active / ${total}`} color="#e7eaef" />
@@ -623,8 +543,8 @@ export default function Sources() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', gap: 2, background: '#0d1116', border: '1px solid #1a1f27', borderRadius: 9, padding: 3 }}>
             {seg('all', 'All', total)}
-            {seg('static', 'Static', normalized.filter((s) => s.kind === 'static').length)}
-            {seg('dynamic', 'Dynamic', normalized.filter((s) => s.kind === 'dynamic').length)}
+            {seg('free', 'No key needed', normalized.filter((s) => !needsKeyGroup(s)).length)}
+            {seg('keyed', 'Needs a key', normalized.filter(needsKeyGroup).length)}
           </div>
           <input
             value={query}

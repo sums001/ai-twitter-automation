@@ -16,6 +16,7 @@ from opensocial.core.models import ContentItem
 from opensocial.sources.base import (
     DEFAULT_TIMEOUT,
     USER_AGENT,
+    Setting,
     Source,
     parse_iso8601,
     register,
@@ -28,6 +29,13 @@ LIST_URL = "https://dev.to/api/articles"
 class DevToSource(Source):
     name = "devto"
     category = "tech"
+    label = "dev.to"
+    description = "Newest dev.to articles, optionally for one tag, with full article text."
+    settings = (
+        Setting("tag", "dev.to tag; empty returns the latest across all tags.", ""),
+        Setting("limit", "Max items per fetch.", 30),
+        Setting("full_text", "Fetch each article's full body (one request each).", True),
+    )
 
     async def fetch(self) -> list[ContentItem]:
         limit: int = int(self.config.get("limit", 30))

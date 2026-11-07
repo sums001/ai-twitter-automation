@@ -46,6 +46,13 @@
         "BTC-USD"
       ],
       "limit": 10
+    },
+    "rss": {
+      "category": "finance",
+      "feeds": [
+        "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+        "https://www.cnbc.com/id/10000664/device/rss/rss.html"
+      ]
     }
   }
 }

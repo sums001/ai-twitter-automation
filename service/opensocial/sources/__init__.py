@@ -15,13 +15,10 @@ from opensocial.sources.base import (  # noqa: F401
 from opensocial.sources import (  # noqa: F401,E402
     arxiv,
     devto,
-    github_releases,
     googlenews,
     guardian,
     hackernews,
     medium,
-    nasa,
-    producthunt,
     reddit,
     rss,
     youtube,

@@ -127,13 +127,11 @@ export function AppProvider({ children }) {
   // ---- settings navigation (deep-link into the niche editor) ----------------
   const [settingsTab, setSettingsTab] = useState('general');
   const [settingsNiche, setSettingsNiche] = useState(null); // open niche on the Niches page
-  const [nicheTab, setNicheTab] = useState('general');
 
   // Niche config now lives on the Niches page; deep-link selects it there.
   const editNiche = useCallback((n) => {
     setRoute('niches');
     setSettingsNiche(n);
-    setNicheTab('general');
   }, []);
 
   // Create a named workspace, then drop into its fresh dashboard. Refreshes the
@@ -167,12 +165,12 @@ export function AppProvider({ children }) {
       autopilot, toggleAutopilot,
       commands, runCommand,
       nichesVersion,
-      settingsTab, setSettingsTab, settingsNiche, setSettingsNiche, nicheTab, setNicheTab,
+      settingsTab, setSettingsTab, settingsNiche, setSettingsNiche,
       editNiche,
     }),
     [route, niche, account, accounts, reloadAccounts, withWorkspace, currentWorkspace, createWorkspace,
      status, reloadStatus, dryRun, toggleDry, autopilot, toggleAutopilot,
-     commands, runCommand, nichesVersion, settingsTab, settingsNiche, nicheTab, editNiche]
+     commands, runCommand, nichesVersion, settingsTab, settingsNiche, editNiche]
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

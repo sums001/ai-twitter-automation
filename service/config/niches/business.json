@@ -38,9 +38,31 @@
     "half_life_hours": 36
   },
   "sources": {
-    "producthunt": {
-      "enabled": true,
-      "limit": 20
+    "googlenews": {
+      "query": "business",
+      "limit": 30
+    },
+    "rss": {
+      "category": "business",
+      "feeds": [
+        "http://feeds.harvardbusiness.org/harvardbusiness/",
+        "https://www.fastcompany.com/latest/rss",
+        "https://fortune.com/feed/",
+        "https://www.entrepreneur.com/latest.rss"
+      ]
     }
+  },
+  "schedule": {
+    "windows": [
+      [
+        "09:00",
+        "21:00"
+      ]
+    ],
+    "posts_per_day": [
+      1,
+      1
+    ],
+    "min_gap_minutes": 45
   }
 }

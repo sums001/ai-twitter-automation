@@ -213,7 +213,7 @@ function AiProvidersTab() {
               </div>
             )}
             <div className="os-mono" style={{ fontSize: 9.5, color: '#5b6470', marginTop: 16, lineHeight: 1.5 }}>
-              images are set per-niche (General tab → Image source: Unsplash, Content, or None).
+              images are set per-niche (Niches page → Content → Image source: Unsplash, Content, or None).
             </div>
           </div>
         </div>
@@ -811,7 +811,7 @@ function WorkspaceAiKeysCard() {
         ))}
       </div>
       <div className="os-mono" style={{ fontSize: 9.5, color: '#4b5563', marginTop: 12, lineHeight: 1.5 }}>
-        source API keys (YouTube, Guardian, NASA…) are shared across workspaces — set them on the Sources tab.
+        source API keys (YouTube, The Guardian) are shared across workspaces — set them on the Sources tab.
       </div>
     </Card>
   );
@@ -846,7 +846,7 @@ function WorkspaceImageKeysCard() {
         ))}
       </div>
       <div className="os-mono" style={{ fontSize: 9.5, color: '#4b5563', marginTop: 12, lineHeight: 1.5 }}>
-        applies to niches with Image source = Unsplash (per-niche, General tab). Without a key those niches fall back to no image.
+        applies to niches with Image source = Unsplash (per-niche, Niches page → Content). Without a key those niches fall back to no image.
       </div>
     </Card>
   );

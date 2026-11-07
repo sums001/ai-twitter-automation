@@ -3,7 +3,7 @@
 The persona comes from the niche config as three per-niche controls — a **style**
 (casual / funny / informative / professional / question / supportive), a target
 **length** (very_short … long), and free-text **instructions** — that the
-dashboard's General tab edits. (A legacy free-text ``voice``/``tone`` is still
+dashboard's niche editor (Voice column) edits. (A legacy free-text ``voice``/``tone`` is still
 honored as a fallback when no style is set.) The post type selects an intent
 template; and a fixed set of cross-cutting rules — absorbed from a working
 reference implementation — is appended to every prompt so drafts come out

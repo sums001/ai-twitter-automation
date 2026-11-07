@@ -119,9 +119,25 @@ def _do_fetch(
     slug: str | None,
     settings: Settings,
     only_source: str | None = None,
+    skipped: list[str] | None = None,
 ) -> dict:
+    """Fetch every enabled source for the followed niches; return new-item counts.
+
+    Keyed ``"<niche>:<source>"``. When ``skipped`` is given, a plain-language
+    reason is appended for everything that was *not* fetched (source turned
+    off, missing key, no followed niche…), so a run that does nothing can say
+    why instead of reporting a silent "no changes".
+    """
     from opensocial.core.db import store_items
-    from opensocial.sources import get_source
+    from opensocial.sources import available_sources, get_source
+
+    reasons: dict[str, None] = {}  # ordered set of skip reasons
+
+    def skip(reason: str) -> None:
+        reasons.setdefault(reason, None)
+
+    def label(name: str) -> str:
+        return getattr(get_source(name), "label", "") or name
 
     with session_factory() as s:
         statuses = {
@@ -130,24 +146,43 @@ def _do_fetch(
         }
 
     niche_list = _followed_niches(session_factory, config_dir, slug)
+    known = set(available_sources())
+    if not niche_list:
+        skip(
+            f"niche {slug!r} not found" if slug
+            else "no niche is followed (pick niches on the Niches page)"
+        )
+    elif only_source and not any(only_source in n.sources for n in niche_list):
+        if only_source in known:
+            skip(f"{label(only_source)} isn't used by any followed niche")
+        else:
+            skip(f"unknown source {only_source!r}")
 
     async def run() -> dict:
         result: dict[str, int] = {}
         touched: set[str] = set()
         for niche in niche_list:
             if not niche.enabled:
+                skip(f"niche {niche.slug} is disabled")
                 continue
             for name, scfg in niche.sources.items():
                 if only_source and name != only_source:
                     continue
+                if name not in known:
+                    continue  # stale entry for a removed source
                 if scfg.get("enabled") is False:
+                    skip(f"{label(name)} is off in the {niche.slug} niche")
                     continue
                 # No status row → the source is disabled (fresh-DB default).
                 enabled_globally, stored_key = statuses.get(name, (False, None))
                 if not enabled_globally:
+                    skip(f"{label(name)} is turned off on the Sources page")
                     continue
                 if stored_key and not scfg.get("api_key"):
                     scfg = {**scfg, "api_key": stored_key}
+                if get_source(name).missing_required_key(scfg):
+                    skip(f"{label(name)} needs an API key (add it on the Sources page)")
+                    continue
                 try:
                     items = await get_source(name)(scfg).fetch()
                 except Exception as exc:  # one bad source shouldn't sink the run
@@ -176,7 +211,10 @@ def _do_fetch(
                 s.commit()
         return result
 
-    return asyncio.run(run())
+    result = asyncio.run(run())
+    if skipped is not None:
+        skipped.extend(reasons)
+    return result
 
 
 def _ai_config_with_key(session, workspace_id: str | None) -> dict:
@@ -449,10 +487,17 @@ def process_commands(
         try:
             if ctype == "fetch_sources":
                 # Fetch is shared across workspaces; a niche/source narrows it.
+                skipped: list[str] = []
                 result = _do_fetch(
                     session_factory, config_dir, payload.get("niche"),
-                    settings, payload.get("source"),
+                    settings, payload.get("source"), skipped=skipped,
                 )
+                if not result and skipped:
+                    # Nothing ran at all: fail with the reason so the dashboard
+                    # toast says why instead of vanishing as "done".
+                    result = {"error": "nothing fetched: " + "; ".join(skipped)}
+                elif skipped:
+                    result = {**result, "skipped": "; ".join(skipped)}
             elif ctype == "generate_posts":
                 result = _do_generate(
                     session_factory, config_dir, workspace_id,

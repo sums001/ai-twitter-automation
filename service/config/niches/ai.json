@@ -51,14 +51,6 @@
       "query": "artificial intelligence",
       "limit": 30
     },
-    "github_releases": {
-      "repos": [
-        "openai/openai-python",
-        "huggingface/transformers",
-        "langchain-ai/langchain"
-      ],
-      "limit": 5
-    },
     "medium": {
       "category": "ai",
       "tags": [
@@ -86,9 +78,9 @@
       ]
     ],
     "posts_per_day": [
-      4,
-      4
+      1,
+      1
     ],
-    "min_gap_minutes": 20
+    "min_gap_minutes": 45
   }
 }

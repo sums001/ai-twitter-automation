@@ -337,6 +337,20 @@ def test_sources_static_vs_dynamic(client):
     assert sources["hackernews"]["category"] == "tech"
 
 
+def test_sources_describe_key_requirement(client, monkeypatch):
+    monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)
+    sources = {s["id"]: s for s in client.get("/api/sources").json()}
+    hn, guardian = sources["hackernews"], sources["guardian"]
+    assert hn["auth"] == "none" and hn["key"] is None and hn["needs_key"] is False
+    assert hn["description"] and {s["name"] for s in hn["settings"]} >= {"query", "limit"}
+    assert guardian["auth"] == "required" and guardian["needs_key"] is True and guardian["key_help"]
+    assert guardian["key_envs"] == ["GUARDIAN_API_KEY"]
+    # source keys in the credentials list come from the registry
+    platforms = {g["platform"] for g in client.get("/api/credentials").json()}
+    assert {"The Guardian", "YouTube"} <= platforms
+    assert not {"Product Hunt", "NASA", "GitHub", "GitHub Releases"} & platforms
+
+
 def test_origin_add_and_remove_roundtrip(client, tmp_path):
     # add a subreddit origin to the tech niche from a full reddit URL
     res = client.post(
