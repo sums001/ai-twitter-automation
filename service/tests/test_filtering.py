@@ -12,7 +12,8 @@ import pytest
 from sqlalchemy.orm import sessionmaker
 
 from opensocial.core.db import Base, make_engine, store_items
-from opensocial.core.filtering import candidate_queue, filter_niche
+from opensocial.core.db import ContentItemNiche
+from opensocial.core.filtering import filter_niche
 from opensocial.core.models import ContentItem
 
 NICHE = "tech"
@@ -105,85 +106,32 @@ def test_near_duplicate_respects_recent_window(session_factory):
     assert counts["duplicate"] == 0
 
 
-def test_queue_orders_by_priority(session_factory):
-    now = datetime.now(timezone.utc)
-    # With equal relevance and no sentiment target, recency decides the order.
+def test_headline_hits_weigh_more_than_body_hits(session_factory):
     items = [
-        _item("Old story", published=now - timedelta(hours=48)),
-        _item("Freshest story", published=now - timedelta(minutes=5)),
-        _item("Fairly fresh story", published=now - timedelta(minutes=10)),
+        _item("New AI chip announced", url="https://a.com/1"),
+        _item("Company reports results", url="https://b.com/2", body="It mentions ai once."),
     ]
-    config = {
-        "filters": {"relevance_keywords": []},
-        "prioritization": {
-            "recency_weight": 1.0,
-            "sentiment_weight": 0.0,
-            "half_life_hours": 24,
-        },
-    }
-
+    config = {"filters": {"relevance_keywords": ["ai"], "relevance_threshold": 1}}
     with session_factory() as session:
         store_items(session, items, NICHE)
         filter_niche(session, NICHE, config)
-        ranked = candidate_queue(session, NICHE, config)
+        scores = {
+            link.content_item_id: link.relevance_score
+            for link in session.query(ContentItemNiche)
+        }
+    by_title = {i.title: scores[i.id] for i in items}
+    assert by_title["New AI chip announced"] > by_title["Company reports results"] > 0
 
-    assert [c.row.title for c in ranked][0] == "Freshest story"
-    assert len(ranked) == 3
-    # priority scores are sorted descending
-    scores = [c.priority_score for c in ranked]
-    assert scores == sorted(scores, reverse=True)
 
-
-def test_relevance_breaks_ties_in_queue(session_factory):
-    now = datetime.now(timezone.utc)
-    # Two items published at the same instant with no engagement signal, so
-    # recency and engagement are identical — relevance must decide the order.
+def test_duplicates_keep_relevance_for_the_knowledge_base(session_factory):
     items = [
-        _item("AI model open source release breakthrough", url="https://a.com/1",
-              published=now),
-        _item("AI thing", url="https://b.com/2", published=now),
+        _item("OpenAI releases new GPT model for developers", url="https://a.com/1"),
+        _item("OpenAI releases new GPT model for developers today", url="https://b.com/2"),
     ]
-    config = {
-        "filters": {
-            "relevance_keywords": ["ai", "model", "open source", "release"],
-            "relevance_threshold": 1,
-        },
-        "prioritization": {
-            "recency_weight": 0.4,
-            "engagement_weight": 0.0,
-            "relevance_weight": 0.6,
-            "sentiment_weight": 0.0,
-            "half_life_hours": 24,
-        },
-    }
-
+    config = {"filters": {"relevance_keywords": ["model"], "dup_threshold": 0.7}}
     with session_factory() as session:
         store_items(session, items, NICHE)
         filter_niche(session, NICHE, config)
-        ranked = candidate_queue(session, NICHE, config)
-
-    # The item hitting more relevance keywords ranks first.
-    assert ranked[0].row.title == "AI model open source release breakthrough"
-
-
-def test_sentiment_target_matching(session_factory):
-    items = [
-        _item("Upbeat tech news", url="https://a.com/1", sentiment=0.8),
-        _item("Grim tech news", url="https://b.com/2", sentiment=-0.8),
-    ]
-    config = {
-        "filters": {"relevance_keywords": []},
-        "prioritization": {
-            "recency_weight": 0.0,
-            "engagement_weight": 0.0,
-            "sentiment_weight": 1.0,
-            "sentiment_target": 1.0,
-        },
-    }
-
-    with session_factory() as session:
-        store_items(session, items, NICHE)
-        filter_niche(session, NICHE, config)
-        ranked = candidate_queue(session, NICHE, config)
-
-    assert ranked[0].row.title == "Upbeat tech news"
+        links = session.query(ContentItemNiche).all()
+    dup = next(link for link in links if link.status == "duplicate")
+    assert dup.relevance_score > 0  # counted as extra coverage downstream

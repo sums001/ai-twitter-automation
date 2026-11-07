@@ -1,45 +1,69 @@
-"""Autopilot timed-refresh gating (workspace model).
-
-In auto mode the worker tops up the draft queue on a cadence, but only inside
-the day's posting window: from ``X`` minutes before the first slot (a warm-up)
-to ``X`` minutes before the last slot, at most once per ``X`` minutes. Fetch is
-a single shared pass; generation runs per auto-mode workspace. These tests pin
-the schedule + throttle decisions with fetch/generate stubbed out.
-"""
+"""Autopilot: one post every X minutes per account, inside its window."""
 
 from __future__ import annotations
 
 import json
+import random
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy.orm import sessionmaker
 
-from opensocial.core import commands
-from opensocial.core.commands import (
-    _window_for_niches,
-    _workspace_niches,
-    autopilot_refresh,
+from opensocial.core.autopilot import (
+    FETCH_LEAD,
+    post_next,
+    tick_all,
+    tick_workspace,
+    workspace_context,
 )
 from opensocial.core.db import (
     Base,
+    GeneratedPost,
+    PostHistory,
+    StoryUsage,
     add_platform_account,
-    get_app_setting,
+    insert_generated_post,
     make_engine,
     set_app_setting,
+    store_items,
 )
-from opensocial.core.scheduler import ScheduleConfig, resolve_slots
-from opensocial.core.settings import set_followed_niches, set_scoped_setting
+from opensocial.core.filtering import filter_niche
+from opensocial.core.knowledge import ingest
+from opensocial.core.models import ContentItem
+from opensocial.core.scheduler import (
+    Cadence,
+    first_post_time,
+    get_next_post_at,
+    load_cadence,
+    next_post_time,
+    save_cadence,
+    set_next_post_at,
+)
+from opensocial.core.settings import save_ai_config, set_followed_niches, set_scoped_setting
+from opensocial.publish.base import Publisher, PublishResult
 
-X = 30  # autopilot_fetch_minutes used throughout
-
+UTC = timezone.utc
 NICHE = {
     "slug": "tech",
     "display_name": "Tech",
     "enabled": True,
-    "schedule": {"windows": [["09:00", "21:00"]], "posts_per_day": [3, 3]},
-    "sources": {},
+    "filters": {"relevance_keywords": []},
+    "post_types": {"news": {"enabled": True}, "take": {"enabled": True}},
+    "image_source": "none",
 }
+ALL_DAY = Cadence(window=("00:00", "23:59"), every_minutes=60, jitter_pct=20,
+                  min_gap_minutes=20, max_pending_drafts=2)
+
+
+class _OkPublisher(Publisher):
+    dry_run = False
+
+    def __init__(self):
+        self.texts = []
+
+    def publish(self, *, text, media_url=None):
+        self.texts.append(text)
+        return PublishResult(ok=True, platform_post_id="1", platform_post_url="https://x.com/1")
 
 
 @pytest.fixture()
@@ -50,124 +74,314 @@ def session_factory(tmp_path):
 
 
 @pytest.fixture()
-def workspace(session_factory):
-    """A workspace (X account) in auto mode that follows the 'tech' niche."""
-    with session_factory() as s:
-        acct = add_platform_account(
-            s, account_label="ws", credentials_encrypted=b"x"
-        )
-        wid = acct.id
-        set_app_setting(s, "autopilot_fetch_minutes", str(X))  # global cadence
-        set_scoped_setting(s, wid, "app_mode", "auto")
-        set_followed_niches(s, ["tech"], wid)
-    return wid
-
-
-@pytest.fixture()
-def config_dir(tmp_path, workspace):
+def config_dir(tmp_path):
     d = tmp_path / "niches"
     d.mkdir()
-    (d / "tech.json").write_text(
-        json.dumps({**NICHE, "account_id": workspace}), encoding="utf-8"
-    )
+    (d / "tech.json").write_text(json.dumps(NICHE), encoding="utf-8")
     return str(d)
 
 
-@pytest.fixture()
-def no_real_work(monkeypatch):
-    """Stub fetch/generate so only the gating logic runs."""
-    monkeypatch.setattr(commands, "_do_fetch", lambda *a, **k: {"tech": 2})
-    monkeypatch.setattr(commands, "_do_generate", lambda *a, **k: {"tech": 1})
+def _workspace(s, label="main", *, mode="auto", cap=None, cadence=ALL_DAY):
+    acct = add_platform_account(s, account_label=label, credentials_encrypted=b"",
+                                daily_post_cap=cap)
+    set_followed_niches(s, ["tech"], acct.id)
+    set_scoped_setting(s, acct.id, "app_mode", mode)
+    set_scoped_setting(s, acct.id, "dry_run", "true")
+    save_ai_config(s, {"text": {"provider": "template"}}, acct.id)
+    save_cadence(s, acct.id, Cadence(**{**cadence.__dict__}))
+    return acct.id
 
 
-def _now():
-    return datetime.now(timezone.utc)
+def _seed(s, *titles):
+    now = datetime.now(UTC)
+    items = [
+        ContentItem(source_name="hackernews", source_category="tech", title=t,
+                    url=f"https://example.com/{i}", published_at=now - timedelta(minutes=10))
+        for i, t in enumerate(titles)
+    ]
+    store_items(s, items, "tech")
+    filter_niche(s, "tech", NICHE)
+    ingest(s)
 
 
-def _slots(now):
-    return resolve_slots(ScheduleConfig.from_niche(NICHE), "tech", now)
+def _ctx(s, wid, config_dir):
+    return workspace_context(s, wid, config_dir)
 
 
-# --- window resolution ----------------------------------------------------
+def _due(s, wid, now):
+    set_next_post_at(s, wid, now - timedelta(seconds=5))
 
 
-def test_window_spans_first_to_last_slot(session_factory, config_dir, workspace):
-    now = _now()
-    niches = _workspace_niches(session_factory, config_dir, workspace, None)
-    first, last = _window_for_niches(niches, now)
-    slots = _slots(now)
-    assert first == slots[0] and last == slots[-1]
+# ---- cadence math ----------------------------------------------------------
 
 
-def test_no_window_without_followed_niches(session_factory, config_dir, workspace):
+def test_slots_are_evenly_spaced_across_the_window():
+    from opensocial.core.scheduler import slot_minutes
+
+    # 09:00-21:00 every 60 -> 12 slots at the middle of each hour
+    slots = slot_minutes(Cadence(window=("09:00", "21:00"), every_minutes=60))
+    assert len(slots) == 12 and slots[0] == 9 * 60 + 30 and slots[-1] == 20 * 60 + 30
+    # 16:30-23:59 every 130 -> round(449/130) = 3 posts spread over the whole window
+    slots = slot_minutes(Cadence(window=("16:30", "23:59"), every_minutes=130))
+    assert len(slots) == 3
+    gaps = {round(b - a, 6) for a, b in zip(slots, slots[1:])}
+    assert len(gaps) == 1
+    assert slots[0] - 16.5 * 60 == pytest.approx((23 * 60 + 59) - slots[-1])
+
+
+def test_next_post_time_takes_the_next_slot_within_jitter():
+    cad = Cadence(window=("09:00", "21:00"), every_minutes=60, jitter_pct=20)
+    rng = random.Random(3)
+    # posted at the 12:30 slot (a bit early or late): next is the 13:30 slot, +-6 min
+    for posted_at in (datetime(2026, 11, 7, 12, 24, tzinfo=UTC), datetime(2026, 11, 7, 12, 36, tzinfo=UTC)):
+        for _ in range(30):
+            nxt = next_post_time(cad, posted_at, UTC, rng)
+            slot = datetime(2026, 11, 7, 13, 30, tzinfo=UTC)
+            assert abs(nxt - slot) <= timedelta(minutes=6)
+    late = datetime(2026, 11, 7, 20, 30, tzinfo=UTC)  # the last slot
+    nxt = next_post_time(cad, late, UTC, rng)
+    assert nxt.date() == late.date() + timedelta(days=1)
+    assert abs(nxt - datetime(2026, 11, 8, 9, 30, tzinfo=UTC)) <= timedelta(minutes=6)
+
+
+def test_first_post_time_is_the_next_slot_from_now():
+    cad = Cadence(window=("09:00", "21:00"), every_minutes=60, jitter_pct=0)
+    rng = random.Random(1)
+    assert first_post_time(cad, datetime(2026, 11, 7, 6, 0, tzinfo=UTC), UTC, rng) == \
+        datetime(2026, 11, 7, 9, 30, tzinfo=UTC)
+    assert first_post_time(cad, datetime(2026, 11, 7, 14, 0, tzinfo=UTC), UTC, rng) == \
+        datetime(2026, 11, 7, 14, 30, tzinfo=UTC)
+    assert first_post_time(cad, datetime(2026, 11, 7, 22, 0, tzinfo=UTC), UTC, rng) == \
+        datetime(2026, 11, 8, 9, 30, tzinfo=UTC)
+
+
+def test_cadence_validation():
+    with pytest.raises(ValueError):
+        Cadence(window=("21:00", "09:00")).validate()
+    with pytest.raises(ValueError):
+        Cadence(every_minutes=2).validate()
+    with pytest.raises(ValueError):
+        Cadence(jitter_pct=80).validate()
+
+
+def test_cadence_seeds_from_legacy_config(session_factory, tmp_path):
+    d = tmp_path / "legacy"
+    d.mkdir()
+    legacy = {**NICHE, "schedule": {"windows": [["08:00", "12:00"], ["14:00", "22:00"]],
+                                    "posts_per_day": [2, 3]}}
+    (d / "tech.json").write_text(json.dumps(legacy), encoding="utf-8")
     with session_factory() as s:
-        set_followed_niches(s, [], workspace)  # unfollow everything
-    niches = _workspace_niches(session_factory, config_dir, workspace, None)
-    first, last = _window_for_niches(niches, _now())
-    assert first is None and last is None
+        acct = add_platform_account(s, account_label="a", credentials_encrypted=b"")
+        set_followed_niches(s, ["tech"], acct.id)
+        set_app_setting(s, "autopilot_fetch_minutes", "45")
+        cad = load_cadence(s, acct.id, config_dir=d)
+    assert cad.window == ("08:00", "22:00")
+    assert cad.every_minutes == 45
 
 
-# --- refresh gating -------------------------------------------------------
-
-
-def test_fires_inside_window(session_factory, config_dir, workspace, no_real_work):
-    now = _slots(_now())[0]  # local-aware first slot, inside [first-X, last-X]
-    result = autopilot_refresh(session_factory, config_dir=config_dir, now=now)
-    assert result == {"fetched": {"tech": 2}, "generated": {"tech": 1}}
+def test_saving_cadence_rerolls_next_post(session_factory, config_dir):
     with session_factory() as s:
-        assert get_app_setting(s, "autopilot_last_refresh") is not None
+        wid = _workspace(s)
+        set_next_post_at(s, wid, datetime.now(UTC) + timedelta(hours=3))
+        save_cadence(s, wid, Cadence(every_minutes=30))
+        assert get_next_post_at(s, wid) is None
 
 
-def test_throttled_within_cadence(session_factory, config_dir, workspace, no_real_work):
-    now = _slots(_now())[0]
-    assert autopilot_refresh(session_factory, config_dir=config_dir, now=now)
-    later = now + timedelta(minutes=X - 1)
-    assert autopilot_refresh(
-        session_factory, config_dir=config_dir, now=later
-    ) is None
+# ---- ticks -----------------------------------------------------------------
 
 
-def test_fires_again_after_cadence(session_factory, config_dir, workspace, no_real_work):
-    slots = _slots(_now())
-    now = slots[0]
-    assert autopilot_refresh(session_factory, config_dir=config_dir, now=now)
-    later = now + timedelta(minutes=X)
-    if later > slots[-1] - timedelta(minutes=X):
-        pytest.skip("window too short for a second cadence step today")
-    assert autopilot_refresh(
-        session_factory, config_dir=config_dir, now=later
-    ) is not None
-
-
-def test_skips_before_warmup(session_factory, config_dir, workspace, no_real_work):
-    first = _slots(_now())[0]
-    too_early = first - timedelta(minutes=X + 5)  # before the warm-up point
-    assert autopilot_refresh(
-        session_factory, config_dir=config_dir, now=too_early
-    ) is None
-
-
-def test_skips_after_last_slot_minus_x(session_factory, config_dir, workspace, no_real_work):
-    last = _slots(_now())[-1]
-    too_late = last - timedelta(minutes=X - 5)  # past last_slot - X
-    assert autopilot_refresh(
-        session_factory, config_dir=config_dir, now=too_late
-    ) is None
-
-
-def test_disabled_in_manual_mode(session_factory, config_dir, workspace, no_real_work):
+def test_first_tick_schedules_then_waits(session_factory, config_dir):
+    now = datetime.now(UTC)
     with session_factory() as s:
-        set_scoped_setting(s, workspace, "app_mode", "manual")
-    now = _slots(_now())[0]
-    assert autopilot_refresh(
-        session_factory, config_dir=config_dir, now=now
-    ) is None
+        wid = _workspace(s)
+        _seed(s, "Open source AI model ships")
+        out = tick_workspace(s, _ctx(s, wid, config_dir), now=now, tz=UTC)
+        assert out.action == "waiting" and out.next_post_at > now
+        out = tick_workspace(s, _ctx(s, wid, config_dir), now=now, tz=UTC)
+        assert out.action == "waiting"
+        assert s.query(GeneratedPost).count() == 0
 
 
-def test_disabled_when_cadence_zero(session_factory, config_dir, workspace, no_real_work):
+def test_due_auto_tick_writes_publishes_and_reschedules(session_factory, config_dir):
+    now = datetime.now(UTC)
+    pub = _OkPublisher()
     with session_factory() as s:
-        set_app_setting(s, "autopilot_fetch_minutes", "0")
-    now = _slots(_now())[0]
-    assert autopilot_refresh(
-        session_factory, config_dir=config_dir, now=now
-    ) is None
+        wid = _workspace(s)
+        _seed(s, "Open source AI model ships", "New dev framework released")
+        _due(s, wid, now)
+        out = tick_workspace(s, _ctx(s, wid, config_dir), now=now, tz=UTC, publisher=pub)
+        assert out.action == "posted"
+        assert len(pub.texts) == 1
+        post = s.query(GeneratedPost).one()
+        assert post.status == "published" and post.story_id
+        assert s.query(StoryUsage).filter_by(status="used").count() == 1
+        nxt = get_next_post_at(s, wid)
+        assert timedelta(minutes=47) <= nxt - now <= timedelta(minutes=73)
+
+
+def test_auto_prefers_a_fresh_waiting_draft(session_factory, config_dir):
+    now = datetime.now(UTC)
+    pub = _OkPublisher()
+    with session_factory() as s:
+        wid = _workspace(s)
+        _seed(s, "Open source AI model ships")
+        mine = insert_generated_post(
+            s, niche_slug="tech", post_type="take", text="my hand written take",
+            ai_text_provider="human", platform_account_id=wid, priority_score=0.5,
+        )
+        s.commit()
+        out = post_next(s, _ctx(s, wid, config_dir), now=now, publisher=pub)
+        assert out.action == "posted" and out.post_id == mine.id
+        assert pub.texts == ["my hand written take"]
+        assert s.query(GeneratedPost).count() == 1  # nothing new written
+
+
+def test_manual_mode_drafts_until_the_review_cap(session_factory, config_dir):
+    now = datetime.now(UTC)
+    with session_factory() as s:
+        wid = _workspace(s, mode="manual")
+        _seed(s, "Open source AI model ships", "New dev framework released", "Rust ships async")
+        actions = []
+        for _ in range(3):
+            _due(s, wid, now)
+            actions.append(tick_workspace(s, _ctx(s, wid, config_dir), now=now, tz=UTC).action)
+        assert actions == ["drafted", "drafted", "skipped"]  # max_pending_drafts=2
+        assert s.query(GeneratedPost).filter_by(status="draft").count() == 2
+        assert s.query(PostHistory).count() == 0  # manual never publishes
+
+
+def test_min_gap_holds_the_post(session_factory, config_dir):
+    now = datetime.now(UTC)
+    pub = _OkPublisher()
+    with session_factory() as s:
+        wid = _workspace(s)
+        _seed(s, "Open source AI model ships", "New dev framework released")
+        assert post_next(s, _ctx(s, wid, config_dir), now=now, publisher=pub).action == "posted"
+        _due(s, wid, now)
+        out = tick_workspace(s, _ctx(s, wid, config_dir), now=now, tz=UTC, publisher=pub)
+        assert out.action == "held" and "minimum gap" in out.detail
+        assert out.next_post_at >= now + timedelta(minutes=19)
+
+
+def test_daily_cap_holds_until_tomorrow(session_factory, config_dir):
+    now = datetime.now(UTC)
+    pub = _OkPublisher()
+    with session_factory() as s:
+        wid = _workspace(s, cap=1, cadence=Cadence(**{**ALL_DAY.__dict__, "min_gap_minutes": 0}))
+        _seed(s, "Open source AI model ships", "New dev framework released")
+        assert post_next(s, _ctx(s, wid, config_dir), now=now, publisher=pub).action == "posted"
+        _due(s, wid, now)
+        out = tick_workspace(s, _ctx(s, wid, config_dir), now=now, tz=UTC, publisher=pub)
+        assert out.action == "held" and "daily cap" in out.detail
+        assert out.next_post_at.date() > now.date()
+
+
+def test_live_without_credentials_is_held(session_factory, config_dir):
+    with session_factory() as s:
+        wid = _workspace(s)
+        set_scoped_setting(s, wid, "dry_run", "false")
+        _seed(s, "Open source AI model ships")
+        out = post_next(s, _ctx(s, wid, config_dir))
+        assert out.action == "held" and "credentials" in out.detail
+        assert s.query(GeneratedPost).count() == 0  # no tokens spent either
+
+
+def test_no_followed_niches_is_idle(session_factory, config_dir):
+    with session_factory() as s:
+        wid = _workspace(s)
+        set_followed_niches(s, [], wid)
+        out = tick_workspace(s, _ctx(s, wid, config_dir), now=datetime.now(UTC), tz=UTC)
+        assert out.action == "idle"
+
+
+def test_used_stories_are_per_account(session_factory, config_dir):
+    now = datetime.now(UTC)
+    with session_factory() as s:
+        a = _workspace(s, "a")
+        b = _workspace(s, "b")
+        _seed(s, "Open source AI model ships")
+        assert post_next(s, _ctx(s, a, config_dir), now=now, publisher=_OkPublisher()).action == "posted"
+        assert post_next(s, _ctx(s, b, config_dir), now=now, publisher=_OkPublisher()).action == "posted"
+        posts = s.query(GeneratedPost).all()
+        assert {p.platform_account_id for p in posts} == {a, b}
+        assert len({p.story_id for p in posts}) == 1  # same story, one post per account
+
+
+# ---- shared fetch ------------------------------------------------------------
+
+
+def test_fetch_runs_just_before_a_post_and_is_throttled(session_factory, config_dir):
+    calls = []
+
+    def fake_fetch(sf, cd):
+        calls.append(cd)
+
+    now = datetime.now(UTC)
+    with session_factory() as s:
+        wid = _workspace(s)
+        set_next_post_at(s, wid, now + FETCH_LEAD + timedelta(minutes=10))
+    tick_all(session_factory, config_dir=config_dir, now=now, fetch=fake_fetch)
+    assert calls == []  # not due soon: no fetch
+    with session_factory() as s:
+        set_next_post_at(s, wid, now + timedelta(minutes=3))
+    tick_all(session_factory, config_dir=config_dir, now=now, fetch=fake_fetch)
+    assert len(calls) == 1
+    tick_all(session_factory, config_dir=config_dir, now=now + timedelta(minutes=1),
+             fetch=fake_fetch)
+    assert len(calls) == 1  # throttled
+
+
+def test_cleanup_runs_at_most_hourly(session_factory):
+    from opensocial.core.autopilot import maybe_prune
+
+    now = datetime.now(UTC)
+    assert maybe_prune(session_factory, now) is not None
+    assert maybe_prune(session_factory, now + timedelta(minutes=30)) is None
+    assert maybe_prune(session_factory, now + timedelta(minutes=61)) is not None
+
+
+# ---------------------------------------------------------------------------
+# Schedule display: projection across days + "will it actually run" status
+# ---------------------------------------------------------------------------
+
+
+def test_projection_continues_into_tomorrow_after_window_closes():
+    from opensocial.core.scheduler import projected_times
+
+    cad = Cadence(window=("08:00", "20:00"), every_minutes=60)
+    now = datetime(2026, 11, 7, 23, 28, tzinfo=UTC)  # window already closed
+    next_at = datetime(2026, 11, 8, 8, 33, tzinfo=UTC)  # 08:30 slot, jittered
+    times = projected_times(cad, next_at, now, UTC)
+    assert times[0] == next_at
+    assert [t.strftime("%H:%M") for t in times[1:3]] == ["09:30", "10:30"]
+    assert len(times) == 12 and times[-1].strftime("%H:%M") == "19:30"
+
+
+def test_projection_spans_rest_of_today_then_tomorrow():
+    from opensocial.core.scheduler import projected_times
+
+    cad = Cadence(window=("08:00", "20:00"), every_minutes=120)  # slots 09,11,...,19
+    now = datetime(2026, 11, 7, 15, 0, tzinfo=UTC)
+    times = projected_times(cad, datetime(2026, 11, 7, 15, 5, tzinfo=UTC), now, UTC)
+    today = [t.hour for t in times if t.day == 7]
+    tomorrow = [t.hour for t in times if t.day == 8]
+    assert today == [15, 17, 19]
+    assert tomorrow == [9, 11, 13, 15, 17, 19]
+
+
+def test_schedule_status_reports_paused_review_queue(session_factory, config_dir):
+    from opensocial.core.autopilot import schedule_status
+
+    now = datetime.now(UTC)
+    with session_factory() as s:
+        wid = _workspace(s, mode="manual")
+        ctx = _ctx(s, wid, config_dir)
+        assert schedule_status(s, ctx, now=now, next_at=now + timedelta(minutes=30))[0] == "ok"
+        assert schedule_status(s, ctx, now=now, next_at=None)[0] == "starting"
+        assert schedule_status(s, ctx, now=now, next_at=now - timedelta(minutes=30))[0] == "overdue"
+        for i in range(ALL_DAY.max_pending_drafts):
+            insert_generated_post(s, niche_slug="tech", post_type="news", text=f"d{i}", ai_text_provider="template",
+                                  platform_account_id=wid)
+        s.commit()
+        state, msg = schedule_status(s, ctx, now=now, next_at=now + timedelta(minutes=30))
+        assert state == "paused" and "waiting for review" in msg

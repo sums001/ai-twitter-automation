@@ -32,13 +32,6 @@
     "dup_threshold": 0.8,
     "dup_window_days": 2
   },
-  "prioritization": {
-    "recency_weight": 0.5,
-    "engagement_weight": 0.25,
-    "relevance_weight": 0.15,
-    "sentiment_weight": 0.1,
-    "half_life_hours": 12
-  },
   "sources": {
     "hackernews": {
       "query": "crypto",
@@ -98,23 +91,5 @@
       "enabled": false
     }
   },
-  "independent_take": {
-    "enabled": false,
-    "per_day": 2,
-    "types": []
-  },
-  "image_source": "content",
-  "schedule": {
-    "windows": [
-      [
-        "09:00",
-        "21:00"
-      ]
-    ],
-    "posts_per_day": [
-      3,
-      3
-    ],
-    "min_gap_minutes": 20
-  }
+  "image_source": "content"
 }

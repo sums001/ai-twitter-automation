@@ -22,6 +22,7 @@ from opensocial.sources.base import Setting, Source, parse_iso8601, register
 class YFinanceSource(Source):
     name = "yfinance"
     category = "finance"
+    trust = 0.6
     label = "Yahoo Finance"
     description = (
         "Yahoo Finance news for the ticker symbols you list. Uses the unofficial "

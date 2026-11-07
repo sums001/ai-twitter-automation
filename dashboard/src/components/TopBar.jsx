@@ -115,7 +115,7 @@ export default function TopBar() {
         <button
           onClick={toggleAutopilot}
           className="hover-bright"
-          title="When on, the service runs due slots unattended (APP_MODE=auto)"
+          title="When on, the service posts every X minutes inside your window, unattended (APP_MODE=auto)"
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer',
             padding: '5px 11px', borderRadius: 8,

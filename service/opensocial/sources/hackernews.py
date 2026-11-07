@@ -27,6 +27,7 @@ SEARCH_URL = "https://hn.algolia.com/api/v1/search_by_date"
 class HackerNewsSource(Source):
     name = "hackernews"
     category = "tech"
+    trust = 0.65
     label = "Hacker News"
     description = "Newest Hacker News stories matching a query, via the Algolia HN API."
     settings = (

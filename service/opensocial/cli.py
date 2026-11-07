@@ -1,12 +1,9 @@
 """OpenX CLI.
 
-Phase 1 commands:
-  * ``fetch``   — poll a niche's enabled sources and store new content
-  * ``sources`` — list registered source plugins
-
-Phase 2 commands:
-  * ``filter``  — apply a niche's filters + near-dup detection to stored content
-  * ``queue``   — print a niche's prioritized candidate queue
+Pipeline: ``fetch`` -> ``filter`` (tags niches, then groups items into
+knowledge-base stories) -> ``stories`` (the scored shortlist) -> ``generate`` /
+``preview`` (write a post) -> ``tick`` / ``post-next`` (autopilot). ``serve``
+runs the dashboard API plus the background worker.
 """
 
 from __future__ import annotations
@@ -17,8 +14,8 @@ from pathlib import Path
 
 import typer
 
-from opensocial.core.approval import sweep_timeouts
-from opensocial.core.commands import autopilot_refresh, process_commands
+from opensocial.core.autopilot import tick_all
+from opensocial.core.commands import process_commands
 from opensocial.core.config import NicheConfig, load_all_niches, load_niche
 from opensocial.core.db import (
     GeneratedPost,
@@ -35,56 +32,34 @@ from opensocial.core.engine import (
     load_credentials_for_account,
     publish_post,
     resolve_account_for_niche,
-    run_due_slots,
 )
-from opensocial.core.filtering import candidate_queue, filter_niche
-from opensocial.core.generate import generate_for_niche, generate_independent
+from opensocial.core.filtering import filter_niche
 from opensocial.core.settings import Settings
 from opensocial.sources import available_sources, get_source
 
 app = typer.Typer(help="OpenX automation service", no_args_is_help=True)
 
 
-def _publish_all_workspaces(session_factory, config_dir: str) -> int:
-    """Publish due slots for every workspace using its own settings + account.
+def _workspace(session, label: str | None):
+    """The workspace (account) named ``label``, else the default one."""
+    from opensocial.core.db import ensure_default_workspace
 
-    Each workspace (X account) publishes the niches it follows under its own
-    dry-run / app-mode / cap and as its own account — niches are a shared
-    catalog, so two workspaces can follow the same niche and publish
-    independently. Falls back to legacy global settings over all niches when no
-    workspace exists yet (pre-workspace install). Returns posts published.
-    """
-    from opensocial.core.db import list_platform_accounts
-    from opensocial.core.settings import get_followed_niches, resolve_settings
+    if label:
+        acct = get_platform_account_by_label(session, label)
+        if acct is None:
+            typer.echo(f"no workspace labelled '{label}'", err=True)
+            raise typer.Exit(1)
+        return acct
+    return ensure_default_workspace(session)
 
-    niches = load_all_niches(config_dir)
-    published = 0
+
+def _report_tick(outcomes, session_factory) -> None:
     with session_factory() as s:
-        accounts = list_platform_accounts(s)
-
-    if not accounts:
-        # Legacy single-setup: one global settings pass over all niches.
-        with session_factory() as s:
-            settings = resolve_settings(s, None)
-        for n in niches:
-            if not n.enabled:
-                continue
-            with session_factory() as s:
-                published += len(run_due_slots(s, n.slug, n.raw, settings))
-        return published
-
-    for acct in accounts:
-        with session_factory() as s:
-            ws_settings = resolve_settings(s, acct.id)
-            followed = set(get_followed_niches(s, acct.id))
-        for n in niches:
-            if n.slug not in followed or not n.enabled:
-                continue
-            with session_factory() as s:
-                published += len(
-                    run_due_slots(s, n.slug, n.raw, ws_settings, account=acct)
-                )
-    return published
+        labels = {a.id: a.account_label for a in list_platform_accounts(s)}
+    for o in outcomes:
+        when = f" (next {o.next_post_at:%H:%M} UTC)" if o.next_post_at else ""
+        detail = f": {o.detail}" if o.detail else ""
+        typer.echo(f"[{labels.get(o.workspace_id, o.workspace_id)}] {o.action}{detail}{when}")
 
 
 async def _fetch_niche(niche: NicheConfig, session_factory) -> None:
@@ -172,98 +147,122 @@ def filter_(
             f"[{n.slug}] {counts['candidate']} candidates, "
             f"{counts['filtered']} filtered, {counts['duplicate']} duplicates"
         )
+    from opensocial.core.knowledge import ingest
+
+    with session_factory() as session:
+        kb = ingest(session)
+    typer.echo(
+        f"knowledge base: {kb.items} item(s) grouped, {kb.new_stories} new "
+        f"stories, {kb.merged} merged into existing ones"
+    )
 
 
 @app.command()
-def queue(
+def stories(
     niche: str = typer.Option(
-        ..., "--niche", "-n", help="Slug of the niche to show the queue for."
+        None, "--niche", "-n",
+        help="Limit to one niche (default: the workspace's followed niches).",
     ),
-    limit: int = typer.Option(20, "--limit", "-l", help="Max candidates to show."),
-    config_dir: str = typer.Option(
-        "config/niches", "--config-dir", help="Directory of niche JSON files."
-    ),
+    account: str = typer.Option(None, "--account", help="Workspace label (default: first)."),
+    limit: int = typer.Option(10, "--limit", "-l", help="How many stories to show."),
+    config_dir: str = typer.Option("config/niches", "--config-dir"),
     db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
 ) -> None:
-    """Print a niche's prioritized candidate queue (best-first)."""
-    niches = _resolve_niches(niche, config_dir)
-    n = niches[0]
+    """Show the knowledge base's scored shortlist for a workspace (no AI)."""
+    from opensocial.core.autopilot import workspace_niches
+    from opensocial.core.knowledge import ingest, shortlist
+
     session_factory = make_session_factory(db)
     with session_factory() as session:
-        ranked = candidate_queue(session, n.slug, n.raw)
-        if not ranked:
-            typer.echo(f"[{n.slug}] no candidates — run 'filter' first?")
+        ingest(session)
+        acct = _workspace(session, account)
+        slugs = [n.slug for n in workspace_niches(session, acct.id, config_dir, niche)]
+        if not slugs:
+            typer.echo("no niches: follow some on the Niches page, or pass --niche")
             return
-        typer.echo(f"[{n.slug}] {len(ranked)} candidates (showing {min(limit, len(ranked))}):")
-        for i, c in enumerate(ranked[:limit], 1):
+        ranked = shortlist(session, acct.id, slugs, k=limit)
+        if not ranked:
             typer.echo(
-                f"  {i:>2}. [{c.priority_score:.3f}] ({c.row.source_name}) {c.row.title}"
+                f"[{acct.account_label}] no unused stories for {', '.join(slugs)}: "
+                "run fetch + filter?"
+            )
+            return
+        typer.echo(
+            f"[{acct.account_label}] top {len(ranked)} unused stories ({', '.join(slugs)}):"
+        )
+        for i, sc in enumerate(ranked, 1):
+            sig = sc.signals
+            typer.echo(f"  {i:>2}. [{sc.score:.3f}] {sc.story.title}")
+            typer.echo(
+                f"      {sc.outlet_count} outlet(s) | {sc.niche_slug} | "
+                f"fresh {sig['freshness']:.2f} | coverage {sig['coverage']:.2f} | "
+                f"postable {sig['postability']:.2f} | novelty {sig['novelty']:.2f}"
             )
 
 
-def _print_drafts(slug: str, drafts, *, dry_run: bool) -> None:
-    tag = "would generate" if dry_run else "generated"
-    if not drafts:
-        typer.echo(f"[{slug}] no drafts {tag} — run 'filter' first, or caps are spent?")
-        return
-    typer.echo(f"[{slug}] {tag} {len(drafts)} draft(s):")
-    for i, d in enumerate(drafts, 1):
-        kind = "independent" if d.independent else "source"
-        img = " [img]" if d.media_url else ""
-        typer.echo(f"  {i:>2}. <{d.post_type}/{kind}>{img} {d.text}")
+@app.command(hidden=True)
+def queue(
+    niche: str = typer.Option(None, "--niche", "-n"),
+    limit: int = typer.Option(10, "--limit", "-l"),
+    config_dir: str = typer.Option("config/niches", "--config-dir"),
+    db: str = typer.Option("opensocial.db", "--db"),
+) -> None:
+    """Old name for ``stories``."""
+    stories(niche=niche, account=None, limit=limit, config_dir=config_dir, db=db)
+
+
+def _print_draft(label: str, d, *, dry_run: bool) -> None:
+    tag = "would write" if dry_run else "wrote"
+    how = {"score": "top ranked", "ai": "AI pick", "synthesis": "synthesis take"}[d.picked_by]
+    extra = f", {len(d.outlets)} outlet(s)" if d.outlets else ""
+    extra += ", full article" if d.used_article else ""
+    img = " [img]" if d.media_url else ""
+    typer.echo(f"[{label}] {tag} <{d.post_type}>{img} from: {d.title} ({how}{extra})")
+    typer.echo(d.text)
+    typer.echo("")
+
+
+def _draft_cmd(niche, account, count, config_dir, db, *, persist: bool) -> None:
+    from opensocial.core.autopilot import draft_for_workspace, workspace_context
+
+    session_factory = make_session_factory(db)
+    with session_factory() as session:
+        acct = _workspace(session, account)
+        ctx = workspace_context(session, acct.id, config_dir, slug=niche)
+        if not ctx.niches:
+            typer.echo("no niches: follow some on the Niches page, or pass --niche", err=True)
+            raise typer.Exit(1)
+        for _ in range(count):
+            d = draft_for_workspace(session, ctx, persist=persist)
+            if d is None:
+                typer.echo(
+                    f"[{acct.account_label}] knowledge base is empty: run fetch + filter first"
+                )
+                return
+            _print_draft(acct.account_label, d, dry_run=not persist)
 
 
 @app.command()
 def generate(
-    niche: str = typer.Option(
-        None, "--niche", "-n", help="Slug of a single niche (default: all)."
-    ),
-    limit: int = typer.Option(5, "--limit", "-l", help="Max source-derived drafts."),
-    independent: bool = typer.Option(
-        True, "--independent/--no-independent",
-        help="Also run the daily independent-take job.",
-    ),
-    config_dir: str = typer.Option(
-        "config/niches", "--config-dir", help="Directory of niche JSON files."
-    ),
+    niche: str = typer.Option(None, "--niche", "-n", help="Only this niche."),
+    account: str = typer.Option(None, "--account", help="Workspace label (default: first)."),
+    count: int = typer.Option(1, "--count", "-c", help="How many drafts to write."),
+    config_dir: str = typer.Option("config/niches", "--config-dir"),
     db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
 ) -> None:
-    """Generate draft posts for one or all niches (writes to generated_posts)."""
-    from opensocial.core.settings import load_ai_config
-
-    niches = _resolve_niches(niche, config_dir)
-    session_factory = make_session_factory(db)
-    for n in niches:
-        with session_factory() as session:
-            config = {**n.raw, "ai": load_ai_config(session)}
-            drafts = generate_for_niche(session, n.slug, config, limit=limit)
-            if independent:
-                drafts = drafts + generate_independent(session, n.slug, config)
-        _print_drafts(n.slug, drafts, dry_run=False)
+    """Write draft post(s) from the knowledge base (marks their stories used)."""
+    _draft_cmd(niche, account, count, config_dir, db, persist=True)
 
 
 @app.command()
 def preview(
-    niche: str = typer.Option(
-        ..., "--niche", "-n", help="Slug of the niche to preview."
-    ),
-    limit: int = typer.Option(5, "--limit", "-l", help="Max source-derived drafts."),
-    config_dir: str = typer.Option(
-        "config/niches", "--config-dir", help="Directory of niche JSON files."
-    ),
+    niche: str = typer.Option(None, "--niche", "-n", help="Only this niche."),
+    account: str = typer.Option(None, "--account", help="Workspace label (default: first)."),
+    config_dir: str = typer.Option("config/niches", "--config-dir"),
     db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
 ) -> None:
-    """Dry-run: show what generation would produce without writing anything."""
-    from opensocial.core.settings import load_ai_config
-
-    niches = _resolve_niches(niche, config_dir)
-    n = niches[0]
-    session_factory = make_session_factory(db)
-    with session_factory() as session:
-        config = {**n.raw, "ai": load_ai_config(session)}
-        drafts = generate_for_niche(session, n.slug, config, limit=limit, persist=False)
-        drafts = drafts + generate_independent(session, n.slug, config, persist=False)
-    _print_drafts(n.slug, drafts, dry_run=True)
+    """Dry-run: show the post that would be written next, storing nothing."""
+    _draft_cmd(niche, account, 1, config_dir, db, persist=False)
 
 
 def _mode_banner(settings: Settings) -> None:
@@ -444,59 +443,66 @@ def niche_account(
 
 
 @app.command()
-def publish(
-    niche: str = typer.Option(
-        None, "--niche", "-n", help="Slug of a single niche (default: all)."
-    ),
-    config_dir: str = typer.Option(
-        "config/niches", "--config-dir", help="Directory of niche JSON files."
+def prune(
+    hours: int = typer.Option(
+        None, "--hours", help="Also set how long unused stories live (saved; default 24)."
     ),
     db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
 ) -> None:
-    """Publish the posts due right now for one or all niches (one-shot).
+    """Forget stale knowledge now (the worker also does this hourly)."""
+    from opensocial.core.knowledge import prune as kb_prune
+    from opensocial.core.knowledge import set_story_ttl_hours, story_ttl_hours
 
-    Niches are a shared catalog: every workspace publishes the niches it follows
-    as its own account under its own settings (dry-run / mode). Falls back to a
-    single legacy pass when no workspace exists yet.
-    """
-    from opensocial.core.db import list_platform_accounts
-    from opensocial.core.settings import get_followed_niches, resolve_settings
-
-    niches = _resolve_niches(niche, config_dir)
     session_factory = make_session_factory(db)
     with session_factory() as session:
-        accounts = list_platform_accounts(session)
+        if hours is not None:
+            set_story_ttl_hours(session, hours)
+        ttl = story_ttl_hours(session)
+        r = kb_prune(session)
+    typer.echo(
+        f"unused stories live {ttl}h: removed {r.stories} stories, {r.items} old items, "
+        f"{r.logs} log lines, {r.commands} commands"
+    )
 
-    def _emit(slug: str, outcomes, *, label: str | None = None):
-        tag = f"{slug}@{label}" if label else slug
-        if not outcomes:
-            typer.echo(f"[{tag}] nothing due")
-            return
-        for o in outcomes:
-            verb = "would post" if o.dry_run else ("posted" if o.ok else "FAILED")
-            typer.echo(f"[{tag}] {verb} <{o.post_type}> {o.post_id} (${o.cost:.3f})")
 
-    if not accounts:
-        with session_factory() as session:
-            settings = resolve_settings(session, None)
-        for n in niches:
-            with session_factory() as session:
-                outcomes = run_due_slots(session, n.slug, n.raw, settings)
-            _emit(n.slug, outcomes)
-        return
+@app.command()
+def tick(
+    config_dir: str = typer.Option("config/niches", "--config-dir"),
+    db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
+) -> None:
+    """Run one autopilot tick for every workspace (posts/drafts only if due)."""
+    session_factory = make_session_factory(db)
+    _report_tick(tick_all(session_factory, config_dir=config_dir), session_factory)
 
-    for acct in accounts:
-        with session_factory() as session:
-            ws_settings = resolve_settings(session, acct.id)
-            followed = set(get_followed_niches(session, acct.id))
-        for n in niches:
-            if n.slug not in followed:
-                continue
-            with session_factory() as session:
-                outcomes = run_due_slots(
-                    session, n.slug, n.raw, ws_settings, account=acct
-                )
-            _emit(n.slug, outcomes, label=acct.account_label)
+
+@app.command(hidden=True)
+def publish(
+    config_dir: str = typer.Option("config/niches", "--config-dir"),
+    db: str = typer.Option("opensocial.db", "--db"),
+) -> None:
+    """Old name for ``tick``."""
+    tick(config_dir=config_dir, db=db)
+
+
+@app.command(name="post-next")
+def post_next_cmd(
+    account: str = typer.Option(None, "--account", help="Workspace label (default: first)."),
+    config_dir: str = typer.Option("config/niches", "--config-dir"),
+    db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
+) -> None:
+    """Publish a workspace's next post now (a fresh draft, or a new one).
+
+    Respects the daily cap, minimum gap and the dry-run fail-safe.
+    """
+    from opensocial.core.autopilot import post_next, workspace_context
+
+    session_factory = make_session_factory(db)
+    with session_factory() as session:
+        acct = _workspace(session, account)
+        ctx = workspace_context(session, acct.id, config_dir)
+        _mode_banner(ctx.settings)
+        outcome = post_next(session, ctx)
+    _report_tick([outcome], session_factory)
 
 
 @app.command(name="post-now")
@@ -560,17 +566,23 @@ def run(
     config_dir: str = typer.Option("config/niches", "--config-dir"),
     db: str = typer.Option("opensocial.db", "--db", help="SQLite database path."),
 ) -> None:
-    """Run the scheduler loop: each tick publishes due slots and drains the
-    command queue. An overlap guard skips a tick if the previous one is still
-    running. Ctrl-C to stop."""
+    """Run the worker loop without the dashboard: each tick drains the command
+    queue and runs the autopilot. An overlap guard skips a tick if the previous
+    one is still running. Ctrl-C to stop."""
     import threading
 
     from apscheduler.schedulers.blocking import BlockingScheduler
 
     from opensocial.core.settings import resolve_settings
 
+    from opensocial.core.db import ensure_default_workspace
+
     session_factory = make_session_factory(db)
     with session_factory() as session:
+        ensure_default_workspace(session)
+        from opensocial.core.knowledge import ingest
+
+        ingest(session)  # group any content stored before the knowledge base
         _mode_banner(resolve_settings(session))
     guard = threading.Lock()
 
@@ -580,12 +592,8 @@ def run(
             return
         try:
             process_commands(session_factory, config_dir=config_dir)
-            niches = load_all_niches(config_dir)
-            # Resolve any approvals left past their timeout before publishing.
-            with session_factory() as session:
-                sweep_timeouts(session, {n.slug: n.raw for n in niches})
-            # Publish per workspace, each under its own settings + account.
-            _publish_all_workspaces(session_factory, config_dir)
+            # Autopilot: each workspace posts on its own cadence.
+            tick_all(session_factory, config_dir=config_dir)
         finally:
             guard.release()
 
@@ -614,10 +622,9 @@ def serve(
 ) -> None:
     """Run the dashboard API plus the background worker in one process.
 
-    The worker drains the dashboard command queue, and (in auto mode) refreshes
-    the draft queue on a cadence inside the day's posting window and publishes
-    due slots — same as `run`, so a separate scheduler process isn't needed
-    while serving the dashboard.
+    The worker drains the dashboard command queue and runs the autopilot (each
+    workspace posts or drafts every X minutes inside its window), same as
+    `run`, so a separate scheduler process isn't needed while serving.
 
     By default this is quiet (worker activity goes to the logs table / dashboard
     Logs page). Pass --verbose to mirror that activity to the terminal.
@@ -635,6 +642,10 @@ def serve(
     injected = inject_stored_secrets(session_factory)
     if injected:
         typer.echo(f"loaded {injected} stored secret(s) into the environment")
+    from opensocial.core.knowledge import ingest
+
+    with session_factory() as session:
+        ingest(session)  # group any content stored before the knowledge base
 
     stop = threading.Event()
     guard = threading.Lock()
@@ -644,19 +655,14 @@ def serve(
             return
         try:
             ran = process_commands(session_factory, config_dir=config_dir)
-            # Autopilot: keep the draft queue topped up with fresh data inside
-            # the posting window (no-op outside the window / no auto workspaces).
-            # Fetch is shared; generation runs per auto-mode workspace.
-            autopilot_refresh(session_factory, config_dir=config_dir)
-            niches = load_all_niches(config_dir)
-            with session_factory() as session:
-                sweep_timeouts(session, {n.slug: n.raw for n in niches})
-            # Publish per workspace, each under its own settings + account.
-            published = _publish_all_workspaces(session_factory, config_dir)
-            if verbose and (ran or published):
+            # Autopilot: each workspace posts (auto) or drafts (manual) every X
+            # minutes inside its window; one shared fetch runs just before.
+            outcomes = tick_all(session_factory, config_dir=config_dir)
+            acted = [o.action for o in outcomes if o.action not in ("waiting", "idle")]
+            if verbose and (ran or acted):
                 typer.echo(
-                    f"[{datetime.now():%H:%M:%S}] tick — "
-                    f"{ran} command(s) run, {published} post(s) published"
+                    f"[{datetime.now():%H:%M:%S}] tick: {ran} command(s) run"
+                    + (f", autopilot {', '.join(acted)}" if acted else "")
                 )
         except Exception as exc:  # the worker must outlive any bad tick
             with session_factory() as session:

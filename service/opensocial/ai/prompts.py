@@ -1,17 +1,22 @@
-"""Prompt assembly: persona + post-type template + cross-cutting rules.
+"""Prompt assembly for the two LLM calls a post costs: *pick* and *write*.
 
-The persona comes from the niche config as three per-niche controls — a **style**
-(casual / funny / informative / professional / question / supportive), a target
-**length** (very_short … long), and free-text **instructions** — that the
-dashboard's niche editor (Voice column) edits. (A legacy free-text ``voice``/``tone`` is still
-honored as a fallback when no style is set.) The post type selects an intent
-template; and a fixed set of cross-cutting rules — absorbed from a working
-reference implementation — is appended to every prompt so drafts come out
-standalone and link-free regardless of niche or type.
+The **write** prompt is deliberately short (~700 tokens with facts):
 
-``build_messages`` returns ``(system, user)`` for any ``TextProvider``. The
-``user`` block always carries a ``SUBJECT:`` line, which the offline
-:class:`~opensocial.ai.text.TemplateProvider` keys off so generation is
+* the niche persona (style / length / custom instructions, as edited on the
+  Niches page; a legacy free-text ``voice``/``tone`` still works),
+* the account's **voice samples**, real posts the model imitates for rhythm and
+  formatting (style, never topic),
+* one post **shape** (what kind of post to write, chosen by code),
+* four rules, and the story's facts.
+
+Rules that code enforces anyway (no markdown, no dashes, length trim, hashtag
+and emoji stripping) are *not* spelled out to the model; ``core/generate.py``
+cleans the draft afterwards. The prompt text itself avoids dashes too, since
+models copy the punctuation they are shown.
+
+``build_messages`` returns ``(system, user)``. The ``user`` block always starts
+with a ``SUBJECT:`` line, which the offline
+:class:`~opensocial.ai.text.TemplateProvider` keys off, so generation is
 testable without a model.
 """
 
@@ -19,113 +24,106 @@ from __future__ import annotations
 
 import re
 
-# Per-type intent instructions. Keys match the taxonomy in project.md.
+# Post shapes, one per tone. Keys are the tone taxonomy shown in the dashboard
+# (``core/posttypes.py``); values say what kind of post to write. Written to
+# match how people actually post, not how outlets headline.
 POST_TYPE_TEMPLATES: dict[str, str] = {
     "news": (
-        "Write a NEWS post about a timely development. Lead with the "
-        "implication or 'why it matters', not the bare headline."
-    ),
-    "spotlight": (
-        "Write a SPOTLIGHT post highlighting a tool, repo, paper, or product "
-        "worth knowing about, and what makes it interesting."
-    ),
-    "insight": (
-        "Write an INSIGHT post: one non-obvious observation or synthesis that "
-        "makes the reader think differently."
+        "Shape: say what happened in one plain sentence, then a blank line, then "
+        "your honest reaction in a sentence or two, in first person."
     ),
     "take": (
-        "Write a TAKE: a bold, opinionated stance on this topic or trend. Have "
-        "a clear point of view; don't hedge."
+        "Shape: a first person hot take on this. Pick a side and commit to it. "
+        "One to three short lines."
     ),
-    "tip": (
-        "Write a TIP: one specific, actionable piece of how-to advice the "
-        "reader can use immediately."
+    "insight": (
+        "Shape: think out loud about what this means or where it leads. A short "
+        "musing, not a report."
     ),
     "question": (
-        "Write a QUESTION post that provokes genuine debate and replies. End "
-        "with an open question."
+        "Shape: share the news in a line, then ask the question you actually "
+        "wonder about it."
+    ),
+    "spotlight": (
+        "Shape: point at the thing and say plainly why it caught your eye."
+    ),
+    "tip": (
+        "Shape: the one practical takeaway for someone in this space, said like "
+        "you would tell a friend."
     ),
     "meme": (
-        "Write a witty, relatable one-liner for this niche. The humor should "
-        "land even before the image."
+        "Shape: a dry, funny one liner about it. No setup, just the line."
     ),
 }
 
-# Appended to every prompt. These serve the standalone, no-link design.
-CROSS_CUTTING_RULES = (
-    "Rules:\n"
-    "- Write it as an original, standalone thought. Never reference or hint at "
-    "a source: no 'according to', no outlet or account names, no 'saw this', "
-    "no links or 'read more'.\n"
-    "- Name the subject inside the post. Never open with 'this', 'that', "
-    "'they', or 'it' pointing at something the reader can't see — the reader "
-    "has no headline, link, or article in front of them, so state what you're "
-    "talking about in your own words.\n"
-    "- Open with a strong, scroll-stopping hook on the first line. No corporate "
-    "filler like 'excited to share' or 'thrilled to announce'.\n"
-    "- Plain text only. Do not wrap the post in quotes or backticks. No "
-    "hashtags unless they are genuinely natural.\n"
-    "- Never use markdown of any kind (no **bold**, *italics*, backticks, "
-    "headings, or bullet points) and no dashes. Not even hyphens between words, "
-    "not en dashes, not em dashes. Use a comma, a period, or a new sentence "
-    "instead.\n"
-    "- Use dead-simple words and short, plain sentences. Write so anyone can "
-    "read it instantly; no jargon, no fancy or complex vocabulary.\n"
-    "- Return only the post text, nothing else."
+# Shape for the synthesis take (nothing fresh left, so read the room instead).
+SYNTHESIS_SHAPE = (
+    "Shape: read the room. Say what these developments together tell you about "
+    "where things are heading right now. Two or three short paragraphs, first "
+    "person, with a clear opinion."
 )
 
+RULES = (
+    "Rules:\n"
+    "- Sound like a person, not a news outlet or a brand. Plain words, short sentences.\n"
+    "- The reader has not seen any article. Name the company, person or thing you mean.\n"
+    "- Never mention sources, outlets, links or 'according to'. No hashtags or emoji.\n"
+    "- Return only the post text."
+)
 
 DEFAULT_VOICE = (
-    "You are a sharp, knowledgeable voice in this niche who writes punchy, "
-    "high-signal posts for X."
+    "You are a sharp, well informed person in this niche who posts on X in "
+    "your own voice."
 )
 
 # Per-niche post style → a voice instruction. Keys match the dashboard buttons.
 STYLE_PROMPTS: dict[str, str] = {
-    "casual": (
-        "Write in a casual, conversational voice — relaxed and friendly, like "
-        "talking to a peer."
-    ),
-    "funny": (
-        "Write with humor and wit. Be playful and entertaining; land a joke or "
-        "a clever turn of phrase."
-    ),
-    "informative": (
-        "Write in an informative, clear voice. Lead with substance and explain "
-        "why it matters."
-    ),
-    "professional": (
-        "Write in a professional, authoritative voice — polished, credible, and "
-        "precise."
-    ),
-    "question": (
-        "Frame the post to provoke curiosity and replies. Lean into open "
-        "questions and discussion."
-    ),
-    "supportive": (
-        "Write in a warm, encouraging, supportive voice that uplifts and "
-        "motivates the reader."
-    ),
+    "casual": "Voice: casual and conversational, like talking to a peer.",
+    "funny": "Voice: witty and playful. Land a joke or a clever turn of phrase.",
+    "informative": "Voice: clear and informative. Lead with substance and why it matters.",
+    "professional": "Voice: professional and precise, credible without being stiff.",
+    "question": "Voice: curious. Lean into open questions that invite replies.",
+    "supportive": "Voice: warm and encouraging.",
 }
 
 # Per-niche target length → a length instruction. Keys match the dashboard.
 LENGTH_PROMPTS: dict[str, str] = {
-    "very_short": "Keep it extremely short — just 2-5 words, punchy.",
-    "short": "Keep it to a single short sentence.",
-    "medium": "Keep it to 1-2 lines.",
-    "long": "Write 3-4 lines of substantive text.",
+    "very_short": "Length: extremely short, a handful of words.",
+    "short": "Length: a single short sentence.",
+    "medium": "Length: one or two short lines.",
+    "long": "Length: three or four short lines.",
 }
+
+# Voice samples used when an account hasn't saved its own: the style the
+# account owner asked for (short paragraphs, first person, a fact then a
+# reaction, the odd CAPS word, no hashtags or links).
+DEFAULT_VOICE_SAMPLES: list[str] = [
+    "Anthropic's UNRELEASED MODEL helped researchers solve an 18 year old "
+    "conjecture in quantum computing.\n\nit's interesting how far ahead these "
+    "internal models are compared to what the public has available.",
+    "I would like to see what a model without Chinese and American "
+    "characteristics would be like",
+    "The more I use GPT-6.1 Terra, the more I like it. There, I said it.\n\n"
+    "It's fast and really really strong in computer/browser use.\n\n"
+    "I underestimated the use case for Terra.",
+    "Now would be the best time for any AI startup to release something.\n\n"
+    "Everyone is eagerly awaiting the next big release, yet the frontier labs "
+    "are holding back.\n\nRight now, any release would receive far more "
+    "attention than usual.",
+    "Dario and team have actively put in fake tool calls to throw off "
+    "distillers, it would be of NO surprise to see reasoning traces be filled "
+    "with harmful and downright wrong choices.\n\nEvery time i read them, I "
+    "panic because of how dumb opus is acting, but then the output is good.",
+]
+
+# Cap on how much sample text goes into a prompt (tokens cost money).
+_SAMPLES_CHAR_BUDGET = 1100
 
 
 def _persona_block(config: dict | None) -> tuple[list[str], str, str | None, str]:
     """Resolve the per-niche persona controls into prompt fragments.
 
-    Returns ``(voice_lines, display_name, length_line, instructions)``:
-
-    * ``voice_lines`` — the style instruction (or a legacy free-text
-      ``voice``/``tone`` fallback, or a default) as a list of system lines.
-    * ``length_line`` — the target-length instruction, or ``None`` if unset.
-    * ``instructions`` — free-text custom instructions for this niche ("").
+    Returns ``(voice_lines, display_name, length_line, instructions)``.
     """
     raw = config or {}
     persona = raw.get("persona") or {}
@@ -151,48 +149,102 @@ def _persona_block(config: dict | None) -> tuple[list[str], str, str | None, str
     return lines, name, length_line, instructions
 
 
+def select_samples(samples: list[str] | None, budget: int = _SAMPLES_CHAR_BUDGET) -> list[str]:
+    """Clean the samples and keep as many as fit the character budget."""
+    out: list[str] = []
+    used = 0
+    for raw in samples or []:
+        text = (raw or "").strip()
+        if not text:
+            continue
+        if out and used + len(text) > budget:
+            break
+        out.append(text)
+        used += len(text)
+    return out
+
+
+def _samples_block(samples: list[str] | None) -> str | None:
+    chosen = select_samples(samples)
+    if not chosen:
+        return None
+    body = "\n---\n".join(chosen)
+    return (
+        "Posts this account wrote. Match their voice, rhythm, casing and line "
+        "breaks. Do not copy their topics or wording:\n---\n" + body + "\n---"
+    )
+
+
 def build_messages(
     *,
     config: dict | None,
     post_type: str,
     subject: str,
-    body: str = "",
+    facts: str = "",
     char_limit: int = 280,
+    samples: list[str] | None = None,
     shorten_to: int | None = None,
+    avoid: list[str] | None = None,
+    shape: str | None = None,
 ) -> tuple[str, str]:
-    """Assemble the ``(system, user)`` prompt for one draft.
+    """Assemble the ``(system, user)`` prompt for one post.
 
-    ``subject`` is the topic line (a content item's title, or the take's topic
-    for independent posts); ``body`` is optional supporting context. When
-    ``shorten_to`` is set, a rewrite-to-fit instruction is added so a too-long
-    first draft can be regenerated tighter.
+    ``subject`` is the story headline (or a synthesis topic); ``facts`` the
+    extracted fact sheet. ``shape`` overrides the tone's shape (the synthesis
+    take). ``shorten_to`` and ``avoid`` are only set on the rare rewrite pass,
+    when code couldn't fix length or clichés on its own.
     """
     voice_lines, niche_name, length_line, instructions = _persona_block(config)
-    template = POST_TYPE_TEMPLATES.get(post_type, POST_TYPE_TEMPLATES["insight"])
+    shape_line = shape or POST_TYPE_TEMPLATES.get(post_type, POST_TYPE_TEMPLATES["take"])
 
-    system_parts = [
-        *voice_lines,
-        f"You are posting for the '{niche_name}' niche.",
-        template,
-    ]
+    system_parts = [f"You write posts for an X account about {niche_name}.", *voice_lines]
     if length_line is not None:
         system_parts.append(length_line)
-    system_parts.append(
-        f"Keep it under {char_limit} characters (every URL counts as 23)."
-    )
-    if shorten_to is not None:
-        system_parts.append(
-            f"The previous draft was too long. Shorten to {shorten_to} "
-            "characters while keeping the hook and the point."
-        )
+    block = _samples_block(samples)
+    if block:
+        system_parts.append(block)
+    system_parts.append(shape_line)
     if instructions:
         system_parts.append(f"Additional instructions: {instructions}")
-    system_parts.append(CROSS_CUTTING_RULES)
+    system_parts.append(RULES)
+    limit = shorten_to or char_limit
+    system_parts.append(f"Keep it under {limit} characters.")
+    if shorten_to is not None:
+        system_parts.append(
+            f"Your last draft was too long. Shorten to {shorten_to} characters, "
+            "keeping the point."
+        )
+    if avoid:
+        system_parts.append("Do not use these words or phrases: " + ", ".join(avoid) + ".")
 
     user_parts = [f"SUBJECT: {subject}"]
-    if body:
-        user_parts.append(f"\nCONTEXT:\n{body.strip()}")
+    if facts:
+        user_parts.append(f"\nFACTS:\n{facts.strip()}")
     return "\n\n".join(system_parts), "\n".join(user_parts)
+
+
+def build_pick_messages(
+    *, niche_names: list[str], stories: list[str], recent_posts: list[str]
+) -> tuple[str, str]:
+    """The tiny "pick" prompt: which shortlisted story to post next.
+
+    ``stories`` are one-line labels (headline plus outlet count). Only called
+    when the free ranking has no clear winner, so most posts skip it.
+    """
+    topics = ", ".join(niche_names) or "this niche"
+    system = (
+        f"You choose what an X account about {topics} posts next. Pick the story "
+        "that would make the most interesting post right now: real news people "
+        "will talk about, not promos, listicles or stock tips, and not a repeat "
+        "of the account's recent posts. Reply with the number only."
+    )
+    parts = []
+    if recent_posts:
+        parts.append("Recent posts:\n" + "\n".join(f"- {p}" for p in recent_posts))
+    parts.append(
+        "Stories:\n" + "\n".join(f"{i}. {s}" for i, s in enumerate(stories, start=1))
+    )
+    return system, "\n\n".join(parts)
 
 
 # Common words that add no value to an Unsplash keyword search.
@@ -208,11 +260,8 @@ def unsplash_query(*, niche_name: str, subject: str, max_words: int = 2) -> str:
     """Build a tight, on-topic Unsplash query (``max_words`` words, default 2).
 
     Unsplash does literal, AND-style keyword matching, so a long headline matches
-    poorly or returns off-topic stock. We keep just a niche anchor (the niche's
-    first word) plus the single most salient word of the subject — the longest
-    non-stopword token, a decent proxy for the most specific/topical term — so the
-    search stays tight and relevant. The provider broadens from here (see
-    ``UnsplashProvider._query_attempts``) only if a tight query finds nothing.
+    poorly. Keeps a niche anchor (the niche's first word) plus the most salient
+    word of the subject (the longest non-stopword token). Free: no LLM call.
     """
     anchor = (niche_name or "").split()
     anchor = anchor[0] if anchor else ""
@@ -227,89 +276,3 @@ def unsplash_query(*, niche_name: str, subject: str, max_words: int = 2) -> str:
             seen.add(part.lower())
             out.append(part)
     return " ".join(out[:max_words]) or (subject or "").strip()
-
-
-def build_image_query_messages(
-    *, niche_name: str, subject: str, body: str = ""
-) -> tuple[str, str]:
-    """Assemble the ``(system, user)`` prompt for the LLM image-query writer.
-
-    Unsplash searches a *stock photo* library, so the best query names a concrete,
-    photographable scene — not the headline, a brand, or an abstract concept. We
-    ask the model for one short visual phrase that captures the post's topic; the
-    caller (:func:`~opensocial.ai.ranking.choose_image_query`) cleans the reply and
-    falls back to the deterministic :func:`unsplash_query` heuristic offline or on
-    failure.
-    """
-    system = (
-        f"You write image search queries for a stock photo library (Unsplash), "
-        f"for posts in the '{niche_name}' niche.\n"
-        "Given a post topic, return ONE short search query (2-4 words) naming a "
-        "concrete, photographable scene or object that visually represents it.\n"
-        "Use plain visual nouns. Do NOT use brand names, product names, people's "
-        "names, dates, or abstract concepts — they return no good stock photos.\n"
-        "Return ONLY the query words: no quotes, punctuation, or explanation."
-    )
-    user = f"Topic: {subject}"
-    if body:
-        user += f"\n{body.strip()[:200]}"
-    return system, user
-
-
-# One-line description of each tone, for the content-aware post-type picker.
-TONE_GLOSS: dict[str, str] = {
-    "news": "a timely, factual development worth reporting",
-    "spotlight": "highlighting a specific tool, product, paper, or project",
-    "insight": "a non-obvious observation or synthesis",
-    "take": "a bold, opinionated stance on a topic or trend",
-    "tip": "specific, actionable how-to advice",
-    "question": "an open question that invites debate",
-    "meme": "a witty, relatable one-liner",
-}
-
-
-def build_posttype_messages(
-    *, niche_name: str, subject: str, body: str = "", choices: list[str]
-) -> tuple[str, str]:
-    """Assemble the ``(system, user)`` prompt for the post-type classifier.
-
-    The model is shown the niche's enabled tones (with a one-line gloss each) and
-    asked to return the single best-fitting one for the item — so the tag matches
-    what the content actually is rather than a random rotation slot.
-    """
-    options = [c for c in choices if c in TONE_GLOSS] or list(choices)
-    lines = "\n".join(f"- {c}: {TONE_GLOSS.get(c, c)}" for c in options)
-    system = (
-        f"You are an editor for the '{niche_name}' niche. Choose the single post "
-        "format that best fits the item below.\n"
-        f"Options:\n{lines}\n"
-        "Judge by what the item actually is, not by variety. Return ONLY the one "
-        "option word (e.g. 'take'), nothing else."
-    )
-    user = f"Item: {subject}"
-    if body:
-        user += f"\n{body.strip()[:200]}"
-    return system, user
-
-
-def build_ranking_messages(
-    *, niche_name: str, items: list[str]
-) -> tuple[str, str]:
-    """Assemble the ``(system, user)`` prompt for the importance reranker.
-
-    ``items`` is a list of ``"<title> — <summary>"`` strings; the model is asked
-    to return their 1-based indices ordered most-important-first. Importance is
-    framed as newsworthiness/significance for the niche — not mere recency.
-    """
-    system = (
-        f"You are an editor for the '{niche_name}' niche deciding what is most "
-        "worth posting about right now.\n"
-        "Rank the numbered items by IMPORTANCE — newsworthiness, significance, "
-        "and how much the audience would care — not by recency or how recent "
-        "they sound.\n"
-        "Return ONLY a comma-separated list of the item numbers, most important "
-        "first, e.g. '3, 1, 2'. No prose, no explanations."
-    )
-    numbered = "\n".join(f"{i}. {text}" for i, text in enumerate(items, start=1))
-    user = f"Items:\n{numbered}"
-    return system, user

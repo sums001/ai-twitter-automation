@@ -3,19 +3,16 @@
   "display_name": "News",
   "enabled": true,
   "filters": {
-    "blocklist": ["nsfw", "clickbait", "you won't believe"],
+    "blocklist": [
+      "nsfw",
+      "clickbait",
+      "you won't believe"
+    ],
     "relevance_keywords": [],
     "relevance_threshold": 1,
     "max_age_days": 2,
     "dup_threshold": 0.75,
     "dup_window_days": 1
-  },
-  "prioritization": {
-    "recency_weight": 0.7,
-    "engagement_weight": 0.2,
-    "relevance_weight": 0.0,
-    "sentiment_weight": 0.1,
-    "half_life_hours": 8
   },
   "sources": {
     "googlenews": {

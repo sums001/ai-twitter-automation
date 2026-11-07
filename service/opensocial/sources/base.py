@@ -103,6 +103,10 @@ class Source(ABC):
     key_help: ClassVar[str] = ""  # where to get the key / what it unlocks
     settings: ClassVar[tuple[Setting, ...]] = ()  # niche-config fields it reads
     upcoming: ClassVar[bool] = False  # shown in the dashboard, can't be enabled
+    # How much the knowledge base trusts this source's items when ranking
+    # stories (0..1). Edited outlets score high; open platforms (anyone can
+    # post) score low. Every plugin sets its own; see test_sources_meta.
+    trust: ClassVar[float] = 0.5
 
     origin_key: ClassVar[str | None] = None
     origin_label: ClassVar[str] = ""  # placeholder for the add-origin input
@@ -159,6 +163,7 @@ class Source(ABC):
             "key_help": cls.key_help,
             "settings": [asdict(s) for s in cls.settings],
             "upcoming": cls.upcoming,
+            "trust": cls.trust,
             "origin_key": cls.origin_key,
             "origin_label": cls.origin_label if cls.origin_key else None,
             "max_origins": cls.max_origins if cls.origin_key else None,

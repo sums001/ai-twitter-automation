@@ -18,7 +18,6 @@ const SETTINGS_GROUPS = [
   ]],
   ['Global', [
     ['workspaces', 'Workspaces'],
-    ['fetch', 'Fetch & data'],
     ['reset-db', 'Reset database'],
   ]],
 ];
@@ -146,6 +145,20 @@ function AiProvidersTab() {
   const localMissingEndpoint = text.provider === 'local' && !((text.endpoint || '').trim());
   const blocked = localMissingEndpoint;
 
+  // Connection test runs against the form's current values (saved or not).
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  React.useEffect(() => { setTestResult(null); }, [text.provider, text.model, text.endpoint]);
+  const testConnection = () => {
+    if (!cfg || testing || blocked) return;
+    setTesting(true);
+    setTestResult(null);
+    api.post(withWorkspace('/api/ai/test'), { text: cfg.text })
+      .then(setTestResult)
+      .catch((e) => setTestResult({ ok: false, error: e.message }))
+      .finally(() => setTesting(false));
+  };
+
   const save = () => {
     if (!cfg || saving || !dirty || blocked) return;
     setSaving(true);
@@ -210,6 +223,31 @@ function AiProvidersTab() {
             {text.provider === 'template' && (
               <div className="os-mono" style={{ fontSize: 9.5, color: '#5b6470', marginTop: 11, lineHeight: 1.5 }}>
                 deterministic offline writer — no model, no key, no network.
+              </div>
+            )}
+            {text.provider !== 'template' && (
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginTop: 14 }}>
+                <button
+                  onClick={testConnection}
+                  disabled={testing || blocked}
+                  className="hover-bright"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0,
+                    cursor: testing || blocked ? 'default' : 'pointer', fontFamily: 'inherit', fontSize: 11.5, fontWeight: 600,
+                    padding: '6px 12px', borderRadius: 7, border: '1px solid rgba(62,207,142,.35)',
+                    background: 'rgba(62,207,142,.1)', color: '#3ecf8e', opacity: blocked ? 0.5 : 1,
+                  }}
+                >
+                  <Play size={11} />
+                  {testing ? 'Testing…' : 'Test connection'}
+                </button>
+                {testResult && (
+                  <div className="os-mono" style={{ fontSize: 10.5, lineHeight: 1.5, paddingTop: 5, color: testResult.ok ? '#3ecf8e' : '#f5455c', wordBreak: 'break-word' }}>
+                    {testResult.ok
+                      ? <>✓ connected · {testResult.model} · {testResult.latency_ms} ms{testResult.reply ? <span style={{ color: '#7a828f' }}> · replied “{testResult.reply}”</span> : null}</>
+                      : <>✗ {testResult.error}</>}
+                  </div>
+                )}
               </div>
             )}
             <div className="os-mono" style={{ fontSize: 9.5, color: '#5b6470', marginTop: 16, lineHeight: 1.5 }}>
@@ -452,53 +490,90 @@ function DatabaseResetTab() {
 // General (service controls)
 // ---------------------------------------------------------------------------
 
-function FetchCadenceCard() {
-  const { status, reloadStatus } = useApp();
-  const current = status ? status.autopilot_fetch_minutes : null;
-  const [value, setValue] = useState('');
+// Voice samples: real posts the writer imitates (rhythm, casing, line breaks),
+// per workspace, since one X account has one voice. A niche can override them.
+function VoiceSamplesCard() {
+  const { withAccount, currentWorkspace } = useApp();
+  const [saved, setSaved] = useState(null); // { samples, default }
+  const [draft, setDraft] = useState([]);
   const [busy, setBusy] = useState(false);
-  React.useEffect(() => { if (current != null) setValue(String(current)); }, [current]);
+  const wsName = currentWorkspace ? `@${currentWorkspace.label}` : 'this workspace';
 
-  const n = parseInt(value, 10);
-  const dirty = current != null && Number.isFinite(n) && n >= 0 && n !== current;
+  const load = React.useCallback(() => {
+    api.get(withAccount('/api/voice')).then((v) => { setSaved(v); setDraft(v.samples); }).catch(() => {});
+  }, [withAccount]);
+  React.useEffect(load, [load]);
+
+  const clean = draft.map((s) => s.trim()).filter(Boolean);
+  const dirty = saved && JSON.stringify(clean) !== JSON.stringify(saved.samples);
 
   const save = () => {
     if (!dirty || busy) return;
     setBusy(true);
-    api.patch('/api/settings', { autopilot_fetch_minutes: n })
-      .then(() => reloadStatus()).catch((e) => alert(e.message)).finally(() => setBusy(false));
+    api.put(withAccount('/api/voice'), { samples: clean })
+      .then((v) => { setSaved(v); setDraft(v.samples); })
+      .catch((e) => alert(e.message)).finally(() => setBusy(false));
+  };
+  const reset = () => {
+    setBusy(true);
+    api.del(withAccount('/api/voice'))
+      .then((v) => { setSaved(v); setDraft(v.samples); })
+      .catch((e) => alert(e.message)).finally(() => setBusy(false));
+  };
+  const setAt = (i, v) => setDraft((d) => d.map((x, j) => (j === i ? v : x)));
+
+  const area = {
+    ...inputStyle, width: '100%', minHeight: 74, resize: 'vertical', lineHeight: 1.5,
+    fontFamily: 'inherit', fontSize: 12.5,
   };
 
   return (
     <Card style={{ padding: '16px 18px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-        <span style={{ fontWeight: 600, fontSize: 13 }}>Autopilot fetch cadence</span>
-        <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>AUTOPILOT_FETCH_MINUTES · refresh the draft queue inside the posting window</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 600, fontSize: 13 }}>Voice samples</span>
+        <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>
+          posts {wsName} sounds like · {saved && saved.default ? 'using the defaults' : 'custom'}
+        </span>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14 }}>
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>Refresh every (minutes)</div>
-          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>
-            fetch → generate from a warm-up before the first slot to this long before the last · 0 disables
+      <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginBottom: 12, lineHeight: 1.6 }}>
+        The writer copies their style (short paragraphs, casing, line breaks), never their topics.
+        Keep 3 to 5 real posts. Blank lines inside a sample are kept.
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+        {draft.map((s, i) => (
+          <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+            <textarea value={s} onChange={(e) => setAt(i, e.target.value)} style={area} />
+            <button
+              onClick={() => setDraft((d) => d.filter((_, j) => j !== i))}
+              className="hover-remove" title="remove sample"
+              style={{ border: 'none', background: 'transparent', color: '#f5455c', cursor: 'pointer', padding: '6px', fontSize: 14 }}
+            >×</button>
           </div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-          <input
-            type="number" min="0" value={value} onChange={(e) => setValue(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') save(); }}
-            style={numStyle}
-          />
+        ))}
+        {draft.length < 8 && (
           <button
-            onClick={save}
-            style={{
-              border: 'none', cursor: dirty && !busy ? 'pointer' : 'default', fontSize: 12, fontWeight: 700,
-              padding: '8px 16px', borderRadius: 8,
-              background: dirty && !busy ? '#3ecf8e' : '#1c222b', color: dirty && !busy ? '#0a0c0f' : '#7a828f',
-            }}
-          >
-            {busy ? 'Saving…' : 'Save'}
+            onClick={() => setDraft((d) => [...d, ''])}
+            className="hover-add"
+            style={{ alignSelf: 'flex-start', border: '1px dashed #2a313c', background: 'transparent', color: '#9aa3af', cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, padding: '6px 11px', borderRadius: 7 }}
+          >+ add sample</button>
+        )}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 9, marginTop: 12 }}>
+        {saved && !saved.default && (
+          <button onClick={reset} disabled={busy} className="hover-border-text" style={{ border: '1px solid #232932', background: 'transparent', color: '#9aa3af', cursor: 'pointer', fontSize: 12, fontWeight: 600, padding: '8px 14px', borderRadius: 8 }}>
+            Use defaults
           </button>
-        </div>
+        )}
+        <button
+          onClick={save}
+          style={{
+            border: 'none', cursor: dirty && !busy ? 'pointer' : 'default', fontSize: 12, fontWeight: 700,
+            padding: '8px 16px', borderRadius: 8,
+            background: dirty && !busy ? '#3ecf8e' : '#1c222b', color: dirty && !busy ? '#0a0c0f' : '#7a828f',
+          }}
+        >
+          {busy ? 'Saving…' : dirty ? 'Save samples' : 'Saved'}
+        </button>
       </div>
     </Card>
   );
@@ -532,7 +607,7 @@ function GeneralTab() {
           <div style={{ ...row, borderBottom: 'none', paddingBottom: 4 }}>
             <div>
               <div style={{ fontSize: 13, fontWeight: 600 }}>Autopilot</div>
-              <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>unattended: timed fetch+generate, then publish due slots (app_mode=auto)</div>
+              <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>posts every X minutes inside the window, set on the Schedule page (app_mode=auto)</div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <span className="os-mono" style={{ fontSize: 11, fontWeight: 600, color: autopilot ? '#3ecf8e' : '#9aa3af' }}>
@@ -543,27 +618,10 @@ function GeneralTab() {
           </div>
         </div>
       </Card>
+      <VoiceSamplesCard />
     </div>
   );
 }
-
-// Global tab: settings that govern the whole install, not one workspace. Today
-// that's the shared autopilot fetch cadence (one pass serves every workspace).
-function FetchDataTab() {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
-        <span style={{ fontWeight: 600, fontSize: 13 }}>Fetch &amp; data</span>
-        <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>shared across all workspaces</span>
-      </div>
-      <FetchCadenceCard />
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Actions
-// ---------------------------------------------------------------------------
 
 function ActionsTab() {
   const { runCommand, commands } = useApp();
@@ -927,7 +985,6 @@ export default function Settings() {
           {settingsTab === 'credentials' && <CredentialsTab />}
           {settingsTab === 'reset-workspace' && <WorkspaceResetTab />}
           {settingsTab === 'workspaces' && <WorkspacesTab />}
-          {settingsTab === 'fetch' && <FetchDataTab />}
           {settingsTab === 'reset-db' && <DatabaseResetTab />}
         </div>
       </div>

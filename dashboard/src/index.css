@@ -69,7 +69,7 @@ button {
 /* ---- responsive layout grids (density / narrow windows) ----------------- */
 .os-grid-kpi {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 12px;
 }
 .os-grid-main {
@@ -81,6 +81,11 @@ button {
 @media (max-width: 1080px) {
   .os-grid-main {
     grid-template-columns: 1fr !important;
+  }
+}
+@media (max-width: 1200px) {
+  .os-grid-kpi {
+    grid-template-columns: repeat(3, 1fr) !important;
   }
 }
 @media (max-width: 900px) {

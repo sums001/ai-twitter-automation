@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -52,10 +51,18 @@ from opensocial.core.db import (
     update_platform_account,
     upsert_source_status,
 )
-from opensocial.core.scheduler import ScheduleConfig, resolve_slots
+from opensocial.core.scheduler import (
+    Cadence,
+    get_next_post_at,
+    load_cadence,
+    projected_times,
+    save_cadence,
+    window_bounds,
+)
 from opensocial.core.settings import (
     get_followed_niches,
     get_schedule_timezone,
+    get_voice_samples,
     get_scoped_setting,
     has_scoped_secret,
     load_ai_config,
@@ -66,6 +73,7 @@ from opensocial.core.settings import (
     set_schedule_timezone,
     set_scoped_secret,
     set_scoped_setting,
+    set_voice_samples,
 )
 from opensocial.sources import available_sources, get_source
 
@@ -117,6 +125,12 @@ COMMAND_TYPES = {
 }
 
 _NICHE_PREFIX = re.compile(r"^\[([a-z0-9_-]+)\]\s*", re.I)
+
+
+def _story_ttl(session) -> int:
+    from opensocial.core.knowledge import story_ttl_hours
+
+    return story_ttl_hours(session)
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -173,7 +187,7 @@ class SettingsPatch(BaseModel):
     dry_run: bool | None = None
     app_mode: str | None = None
     global_daily_cap: int | None = None
-    autopilot_fetch_minutes: int | None = None
+    story_ttl_hours: int | None = None  # forget unused stories after this long
 
 
 class ResetIn(BaseModel):
@@ -240,16 +254,16 @@ class AccountPatch(BaseModel):
     clear_cap: bool = False  # set daily_post_cap back to unlimited
 
 
-class SchedulePut(BaseModel):
-    windows: list[list[str]]
-    posts_per_day: list[int]
-    min_gap_minutes: int
+class CadencePut(BaseModel):
+    window: list[str]  # ["HH:MM", "HH:MM"]: the account's daily posting window
+    every_minutes: int  # one post roughly this often inside the window
+    jitter_pct: int = 20  # each gap randomized by ± this percent
+    min_gap_minutes: int = 20  # safety: never two posts closer than this
+    max_pending_drafts: int = 3  # manual mode: stop drafting at this many waiting
 
 
-class RandomizeIn(BaseModel):
-    window: list[str]  # ["HH:MM", "HH:MM"] — posting time range for the day
-    total_posts: int  # total posts/day, split randomly across scheduled niches
-    min_gap_minutes: int | None = None
+class VoiceIn(BaseModel):
+    samples: list[str]
 
 
 class TimezonePut(BaseModel):
@@ -346,11 +360,12 @@ def create_app(
             if account:
                 q = q.where(GeneratedPost.platform_account_id == account)
             queue_pending = s.execute(q).scalar()
+            ttl = _story_ttl(s)
         return {
             "dry_run": settings.dry_run,
             "app_mode": settings.app_mode,
             "global_daily_cap": settings.global_daily_cap,
-            "autopilot_fetch_minutes": settings.autopilot_fetch_minutes,
+            "story_ttl_hours": ttl,
             "max_post_attempts": settings.max_post_attempts,
             "secret_key_set": bool(settings.secret_key),
             "published_today": published,
@@ -359,20 +374,21 @@ def create_app(
 
     @app.patch("/api/settings")
     def patch_settings(patch: SettingsPatch, account: str | None = None):
-        # dry_run / app_mode are per workspace; fetch cadence stays global.
+        # dry_run / app_mode are per workspace (the cadence is on /api/schedule).
         with session_factory() as s:
             if patch.dry_run is not None:
                 set_scoped_setting(s, account, "dry_run", "true" if patch.dry_run else "false")
+            if patch.story_ttl_hours is not None:
+                from opensocial.core.knowledge import set_story_ttl_hours
+
+                try:
+                    set_story_ttl_hours(s, patch.story_ttl_hours)
+                except ValueError as e:
+                    raise HTTPException(422, str(e))
             if patch.app_mode is not None:
                 if patch.app_mode not in ("manual", "auto"):
                     raise HTTPException(422, "app_mode must be 'manual' or 'auto'")
                 set_scoped_setting(s, account, "app_mode", patch.app_mode)
-            if patch.autopilot_fetch_minutes is not None:
-                if patch.autopilot_fetch_minutes < 0:
-                    raise HTTPException(422, "autopilot_fetch_minutes must be >= 0")
-                set_app_setting(
-                    s, "autopilot_fetch_minutes", str(patch.autopilot_fetch_minutes)
-                )
         return status(account)
 
     @app.post("/api/reset")
@@ -550,6 +566,164 @@ def create_app(
             },
         }
 
+    @app.get("/api/dashboard")
+    def dashboard_stats(account: str | None = None, days: int = 14):
+        """Totals, daily series and breakdowns for the dashboard's charts.
+
+        Stories and content are shared across workspaces (one fetch serves all),
+        so their counts are global; drafts and publishes are scoped to
+        ``account``. Daily buckets are UTC dates, oldest first.
+        """
+        from opensocial.core.db import Story
+        from opensocial.core.knowledge import shortlist
+
+        days = max(1, min(days, 90))
+        today_start, _ = _today_bounds()
+        since = today_start - timedelta(days=days - 1)
+        week_ago = today_start - timedelta(days=6)
+
+        def by_day(col, stmt):
+            day = func.date(col)
+            rows = s.execute(stmt.add_columns(day, func.count()).where(col >= since).group_by(day)).all()
+            return {str(d): int(n) for d, n in rows}
+
+        def scoped(stmt, model):
+            return stmt.where(model.platform_account_id == account) if account else stmt
+
+        def count(stmt):
+            return int(s.execute(stmt).scalar() or 0)
+
+        with session_factory() as s:
+            selected = get_followed_niches(s, account)
+
+            items_day = by_day(ContentItemRow.fetched_at, select())
+            stories_day = by_day(Story.first_seen_at, select())
+            drafts_day = by_day(
+                GeneratedPost.created_at, scoped(select(), GeneratedPost)
+            )
+            pub_day = by_day(
+                PostHistory.attempted_at,
+                scoped(select().where(PostHistory.status == "success"), PostHistory),
+            )
+
+            stories_total = count(select(func.count()).select_from(Story))
+            items_total = count(select(func.count()).select_from(ContentItemRow))
+            published_total = count(
+                scoped(
+                    select(func.count()).select_from(PostHistory).where(PostHistory.status == "success"),
+                    PostHistory,
+                )
+            )
+            status_rows = s.execute(
+                scoped(select(GeneratedPost.status, func.count()), GeneratedPost).group_by(GeneratedPost.status)
+            ).all()
+
+            by_source = [
+                {"name": n, "items": int(c)}
+                for n, c in s.execute(
+                    select(ContentItemRow.source_name, func.count())
+                    .where(ContentItemRow.fetched_at >= week_ago)
+                    .group_by(ContentItemRow.source_name)
+                    .order_by(func.count().desc())
+                ).all()
+            ]
+
+            # Per-niche, last 7 days.
+            niche_items = dict(
+                s.execute(
+                    select(ContentItemNiche.niche_slug, func.count())
+                    .join(ContentItemRow, ContentItemRow.id == ContentItemNiche.content_item_id)
+                    .where(ContentItemRow.fetched_at >= week_ago)
+                    .group_by(ContentItemNiche.niche_slug)
+                ).all()
+            )
+            niche_drafts = dict(
+                s.execute(
+                    scoped(select(GeneratedPost.niche_slug, func.count()), GeneratedPost)
+                    .where(GeneratedPost.created_at >= week_ago)
+                    .group_by(GeneratedPost.niche_slug)
+                ).all()
+            )
+            niche_pub = dict(
+                s.execute(
+                    scoped(
+                        select(GeneratedPost.niche_slug, func.count())
+                        .join(PostHistory, PostHistory.generated_post_id == GeneratedPost.id)
+                        .where(PostHistory.status == "success", PostHistory.attempted_at >= week_ago),
+                        PostHistory,
+                    ).group_by(GeneratedPost.niche_slug)
+                ).all()
+            )
+            niche_stories: dict[str, int] = {}
+            for rel in s.execute(
+                select(Story.niche_relevance).where(Story.first_seen_at >= week_ago)
+            ).scalars():
+                for slug in (rel or {}):
+                    niche_stories[slug] = niche_stories.get(slug, 0) + 1
+
+            top = []
+            if selected:
+                try:
+                    ranked = shortlist(s, account, selected, k=6)
+                except Exception:  # knowledge base unavailable → just omit the list
+                    ranked = []
+                top = [
+                    {
+                        "id": sc.story.id,
+                        "title": sc.story.title,
+                        "niche": sc.niche_slug,
+                        "outlets": len(sc.story.outlets or []),
+                        "items": sc.story.item_count,
+                        "first_seen": _iso(sc.story.first_seen_at),
+                        "score": round(sc.score, 3),
+                    }
+                    for sc in ranked
+                ]
+
+        names = {n.slug: n.display_name for n in niches()}
+        by_niche = [
+            {
+                "slug": slug,
+                "display_name": names.get(slug, slug),
+                "stories": niche_stories.get(slug, 0),
+                "items": int(niche_items.get(slug, 0)),
+                "drafts": int(niche_drafts.get(slug, 0)),
+                "published": int(niche_pub.get(slug, 0)),
+            }
+            for slug in selected
+        ]
+        by_niche.sort(key=lambda r: (-r["stories"], -r["items"]))
+
+        daily = []
+        for i in range(days):
+            d = (since + timedelta(days=i)).date().isoformat()
+            daily.append(
+                {
+                    "date": d,
+                    "items": items_day.get(d, 0),
+                    "stories": stories_day.get(d, 0),
+                    "drafts": drafts_day.get(d, 0),
+                    "published": pub_day.get(d, 0),
+                }
+            )
+        today = daily[-1]
+        return {
+            "totals": {
+                "stories": stories_total,
+                "stories_today": today["stories"],
+                "items": items_total,
+                "items_today": today["items"],
+                "published": published_total,
+                "published_today": today["published"],
+                "drafts_today": today["drafts"],
+            },
+            "daily": daily,
+            "post_status": {str(k): int(v) for k, v in status_rows},
+            "by_source": by_source,
+            "by_niche": by_niche,
+            "top_stories": top,
+        }
+
     # ---- niches ------------------------------------------------------------
 
     @app.get("/api/niches")
@@ -614,72 +788,7 @@ def create_app(
         write_niche(path, config)
         return config
 
-    @app.put("/api/niches/{slug}/schedule")
-    def put_schedule(slug: str, sched: SchedulePut):
-        data, path = niche_or_404(slug)
-        for win in sched.windows:
-            if len(win) != 2 or not all(re.fullmatch(r"\d{2}:\d{2}", w) for w in win):
-                raise HTTPException(422, f"bad window {win!r} (use ['HH:MM','HH:MM'])")
-        if len(sched.posts_per_day) != 2:
-            raise HTTPException(422, "posts_per_day must be [min, max]")
-        data["schedule"] = {
-            "windows": sched.windows,
-            "posts_per_day": sched.posts_per_day,
-            "min_gap_minutes": sched.min_gap_minutes,
-        }
-        write_niche(path, data)
-        return data["schedule"]
-
-    @app.delete("/api/niches/{slug}/schedule")
-    def delete_schedule(slug: str):
-        """Take a niche off the schedule (drop its ``schedule`` block)."""
-        data, path = niche_or_404(slug)
-        if "schedule" in data:
-            del data["schedule"]
-            write_niche(path, data)
-        return {"ok": True, "slug": slug}
-
-    @app.post("/api/schedule/randomize")
-    def randomize_schedule(body: RandomizeIn):
-        """Randomly spread a daily post total across the scheduled niches.
-
-        The total is split as a random multinomial draw over the niches that
-        are currently on the schedule; each niche's windows are set to the
-        given posting time range and its ``posts_per_day`` to its share.
-        """
-        win = body.window
-        if len(win) != 2 or not all(re.fullmatch(r"\d{2}:\d{2}", w) for w in win):
-            raise HTTPException(422, "window must be ['HH:MM','HH:MM']")
-        if win[0] >= win[1]:
-            raise HTTPException(422, "window start must be before end")
-        if body.total_posts < 0:
-            raise HTTPException(422, "total_posts must be >= 0")
-
-        scheduled = [n for n in niches() if (n.raw or {}).get("schedule")]
-        if not scheduled:
-            raise HTTPException(400, "no niches on the schedule to randomize")
-
-        slugs = [n.slug for n in scheduled]
-        shares = {slug: 0 for slug in slugs}
-        for _ in range(body.total_posts):
-            shares[random.choice(slugs)] += 1
-
-        for n in scheduled:
-            data, path = niche_or_404(n.slug)
-            existing = data.get("schedule") or {}
-            gap = body.min_gap_minutes
-            if gap is None:
-                gap = int(existing.get("min_gap_minutes", 45))
-            share = shares[n.slug]
-            data["schedule"] = {
-                "windows": [list(win)],
-                "posts_per_day": [share, share],
-                "min_gap_minutes": int(gap),
-            }
-            write_niche(path, data)
-        return schedule()
-
-    # ---- schedule (resolved slots) ------------------------------------------
+    # ---- schedule (per-account cadence) ---------------------------------------
 
     @app.get("/api/schedule/timezone")
     def get_timezone():
@@ -698,48 +807,203 @@ def create_app(
             s.commit()
         return {"timezone": tz}
 
+    def _today_activity(s, account: str | None, start, end) -> list[dict]:
+        stmt = (
+            select(GeneratedPost, PostHistory.attempted_at)
+            .join(PostHistory, PostHistory.generated_post_id == GeneratedPost.id)
+            .where(
+                PostHistory.status == "success",
+                PostHistory.attempted_at >= start,
+                PostHistory.attempted_at < end,
+            )
+            .order_by(PostHistory.attempted_at)
+        )
+        if account:
+            stmt = stmt.where(PostHistory.platform_account_id == account)
+        return [
+            {
+                "at": _iso(at),
+                "niche": post.niche_slug,
+                "type": post.post_type,
+                "text": post.text,
+                "post_id": post.id,
+            }
+            for post, at in s.execute(stmt).all()
+        ]
+
     @app.get("/api/schedule")
     def schedule(account: str | None = None):
+        """The account's cadence, next post time and today's posting timeline."""
         now = datetime.now(timezone.utc)
-        out = []
-        scoped = account_niche_slugs(account)  # this workspace's followed niches
         with session_factory() as s:
             tz_name = get_schedule_timezone(s)
             tz = resolve_tz(tz_name)
-            for n in niches():
-                # Only niches that have a schedule block are "on the schedule".
-                if not (n.raw or {}).get("schedule"):
-                    continue
-                # Shared catalog: a workspace's schedule is its followed niches.
-                if scoped is not None and n.slug not in scoped:
-                    continue
-                cfg = ScheduleConfig.from_niche(n.raw)
-                slots = resolve_slots(cfg, n.slug, now, tz=tz)
-                # "due" here is purely informational for the schedule view: how
-                # many of today's slots have elapsed (the engine no longer catches
-                # these up — only slots that *just* came due publish).
-                due = sum(1 for t in slots if t <= now)
-                published = published_today_count(
-                    s, niche_slug=n.slug, platform_account_id=account, day=now
-                )
-                out.append(
+            cadence = load_cadence(s, account, config_dir=config_dir)
+            settings = resolve_settings(s, account)
+            next_at = get_next_post_at(s, account) if account else None
+            win_start, win_end = window_bounds(cadence, now, tz)
+            day_start = win_start.replace(hour=0, minute=0).astimezone(timezone.utc)
+            day_end = day_start + timedelta(days=1)
+            posted = _today_activity(s, account, day_start, day_end)
+            pending_q = select(func.count()).select_from(GeneratedPost).where(
+                GeneratedPost.status == "draft"
+            )
+            if account:
+                pending_q = pending_q.where(GeneratedPost.platform_account_id == account)
+            pending = int(s.execute(pending_q).scalar() or 0)
+            acct = get_platform_account(s, account) if account else None
+            followed = get_followed_niches(s, account) if account else []
+            if next_at is not None and next_at < now - timedelta(hours=12):
+                next_at = None  # left over from an earlier day; the worker re-rolls it
+            state, message = "ok", ""
+            if account:
+                from opensocial.core.autopilot import schedule_status, workspace_context
+
+                ctx = workspace_context(s, account, config_dir)
+                if ctx is not None:
+                    state, message = schedule_status(s, ctx, now=now, next_at=next_at)
+        today = now.astimezone(tz).date()
+
+        def when(t: datetime) -> dict:
+            local = t.astimezone(tz)
+            return {
+                "at": _iso(t),
+                "day": (local.date() - today).days,  # 0 = today, 1 = tomorrow
+                "minute": local.hour * 60 + local.minute,  # minute of day in the schedule tz
+            }
+
+        upcoming = [
+            when(t) for t in projected_times(cadence, next_at, now, tz)
+            if t >= now - timedelta(minutes=1)
+        ]
+        caps = [c for c in ((acct.daily_post_cap if acct else None), settings.global_daily_cap) if c and c > 0]
+        return {
+            "now": _iso(now),
+            "now_minute": now.astimezone(tz).hour * 60 + now.astimezone(tz).minute,
+            "timezone": tz_name,
+            "cadence": cadence.to_dict(),
+            "mode": settings.app_mode,
+            "dry_run": settings.dry_run,
+            "next_post_at": _iso(next_at),
+            "next_post": when(next_at) if next_at else None,
+            "status": {"state": state, "message": message},
+            "window_today": [_iso(win_start), _iso(win_end)],
+            "upcoming": upcoming,
+            "posted_today": [
+                {**p, "minute": when(datetime.fromisoformat(p["at"]))["minute"]} for p in posted
+            ],
+            "pending_drafts": pending,
+            "daily_cap": acct.daily_post_cap if acct is not None else None,
+            "global_daily_cap": settings.global_daily_cap,
+            "effective_cap": min(caps) if caps else None,
+            "followed_niches": followed,
+        }
+
+    @app.put("/api/schedule")
+    def put_schedule(body: CadencePut, account: str | None = None):
+        """Save the account's window and rhythm; the next post time re-rolls."""
+        win = body.window
+        if len(win) != 2 or not all(re.fullmatch(r"\d{2}:\d{2}", w) for w in win):
+            raise HTTPException(422, "window must be ['HH:MM','HH:MM']")
+        cadence = Cadence(
+            window=(win[0], win[1]),
+            every_minutes=body.every_minutes,
+            jitter_pct=body.jitter_pct,
+            min_gap_minutes=body.min_gap_minutes,
+            max_pending_drafts=body.max_pending_drafts,
+        )
+        with session_factory() as s:
+            try:
+                save_cadence(s, account, cadence)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+        return schedule(account)
+
+    # ---- voice samples -------------------------------------------------------
+
+    @app.get("/api/voice")
+    def get_voice(account: str | None = None):
+        """The account's voice samples (real posts the writer imitates)."""
+        with session_factory() as s:
+            samples, is_default = get_voice_samples(s, account)
+        return {"samples": samples, "default": is_default}
+
+    @app.put("/api/voice")
+    def put_voice(body: VoiceIn, account: str | None = None):
+        with session_factory() as s:
+            saved = set_voice_samples(s, account, body.samples)
+        return {"samples": saved, "default": False}
+
+    @app.delete("/api/voice")
+    def reset_voice(account: str | None = None):
+        """Forget the account's own samples and go back to the defaults."""
+        from opensocial.core.db import AppSetting
+
+        key = f"ws:{account}:voice_samples" if account else "voice_samples"
+        with session_factory() as s:
+            row = s.get(AppSetting, key)
+            if row is not None:
+                s.delete(row)
+                s.commit()
+        return get_voice(account)
+
+    # ---- knowledge base ------------------------------------------------------
+
+    @app.get("/api/stories")
+    def stories(account: str | None = None, niche: str | None = None, limit: int = 40):
+        """The knowledge base as this account sees it: the scored shortlist
+        (unused stories, best first) plus recently used ones."""
+        from opensocial.core.db import Story, StoryUsage
+        from opensocial.core.knowledge import shortlist
+
+        with session_factory() as s:
+            slugs = [niche] if niche else (get_followed_niches(s, account) if account else [])
+            if not slugs:
+                slugs = [n.slug for n in niches()]
+            ranked = shortlist(s, account, slugs, k=max(1, min(limit, 200)))
+            used = []
+            if account:
+                rows = s.execute(
+                    select(Story, StoryUsage)
+                    .join(StoryUsage, StoryUsage.story_id == Story.id)
+                    .where(
+                        StoryUsage.platform_account_id == account,
+                        StoryUsage.status == "used",
+                    )
+                    .order_by(StoryUsage.used_at.desc())
+                    .limit(20)
+                ).all()
+                used = [
                     {
-                        "slug": n.slug,
-                        "display_name": n.display_name,
-                        "enabled": n.enabled,
-                        "windows": [
-                            [w[0].strftime("%H:%M"), w[1].strftime("%H:%M")]
-                            for w in cfg.windows
-                        ],
-                        "posts_per_day": list(cfg.posts_per_day),
-                        "min_gap_minutes": cfg.min_gap_minutes,
-                        "slots": [_iso(t) for t in slots],
-                        "due": due,
-                        "published_today": published,
-                        "owes": max(0, due - published) if n.enabled else 0,
+                        "id": st.id,
+                        "title": st.title,
+                        "outlets": st.outlets,
+                        "used_at": _iso(u.used_at),
+                        "post_id": u.generated_post_id,
                     }
-                )
-        return {"now": _iso(now), "timezone": tz_name, "niches": out}
+                    for st, u in rows
+                ]
+            total = s.execute(select(func.count()).select_from(Story)).scalar() or 0
+            return {
+                "total_stories": int(total),
+                "story_ttl_hours": _story_ttl(s),
+                "niches": slugs,
+                "shortlist": [
+                    {
+                        "id": sc.story.id,
+                        "title": sc.story.title,
+                        "summary": sc.story.summary,
+                        "niche": sc.niche_slug,
+                        "outlets": sc.story.outlets,
+                        "items": sc.story.item_count,
+                        "first_seen": _iso(sc.story.first_seen_at),
+                        "score": sc.score,
+                        "signals": {k: round(v, 3) for k, v in sc.signals.items()},
+                    }
+                    for sc in ranked
+                ],
+                "used": used,
+            }
 
     # ---- posts (queue) -------------------------------------------------------
 
@@ -1172,6 +1436,64 @@ def create_app(
             saved = save_ai_config(s, {"text": text}, account)
             saved["key_status"] = _ai_key_status(s, account)
         return saved
+
+    @app.post("/api/ai/test")
+    def test_ai(body: AiConfigIn, account: str | None = None):
+        """Send a tiny prompt through the text provider and report the outcome.
+
+        Tests the form's current (possibly unsaved) values, resolving the API key
+        exactly as generation does: the workspace's stored key, else the env var.
+        Always answers 200 with ``ok`` so the dashboard can show the error inline.
+        """
+        import time
+
+        from opensocial.ai.text import PROVIDER_KEY_ENV, TextProviderError, get_text_provider
+        from opensocial.core.settings import get_scoped_secret
+
+        text = dict(body.text or {})
+        provider_name = (text.get("provider") or "local").lower()
+        if provider_name == "local" and not (text.get("endpoint") or "").strip():
+            return {"ok": False, "error": "endpoint is required for the local provider"}
+
+        env = PROVIDER_KEY_ENV.get(provider_name)
+        if env:
+            with session_factory() as s:
+                key = get_scoped_secret(s, account, env) or os.environ.get(env)
+            if not key:
+                return {"ok": False, "error": f"no API key set ({env})"}
+            text["api_key"] = key
+        # Keep the probe cheap and bounded regardless of the saved settings.
+        text["max_tokens"] = 16
+        try:
+            provider = get_text_provider({"ai": {"text": text}})
+        except TextProviderError as exc:
+            return {"ok": False, "error": str(exc)}
+        if hasattr(provider, "params"):
+            provider.params["timeout"] = 20
+
+        started = time.monotonic()
+        try:
+            reply = provider.generate(
+                "You are a connectivity check. Reply with the single word: OK",
+                "ping",
+            )
+        except Exception as exc:  # any provider/network failure is the answer
+            msg = (str(exc).strip().splitlines() or [type(exc).__name__])[0][:300]
+            if "LLM Provider NOT provided" in str(exc):
+                msg = (
+                    f"model {text.get('model')!r} has no provider prefix — use e.g. "
+                    "'ollama/<model>' for Ollama or 'openai/<model>' for an "
+                    "OpenAI-compatible server"
+                )
+            elif provider_name == "local" and "404" in str(exc) and not text.get("endpoint", "").rstrip("/").endswith("/v1"):
+                msg += " — OpenAI-compatible servers usually need '/v1' on the endpoint"
+            return {"ok": False, "error": msg}
+        return {
+            "ok": True,
+            "model": getattr(provider, "name", provider_name),
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "reply": (reply or "").strip()[:120],
+        }
 
     # ---- commands --------------------------------------------------------------------
 

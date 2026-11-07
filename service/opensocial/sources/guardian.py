@@ -30,6 +30,7 @@ API_URL = "https://content.guardianapis.com/search"
 class GuardianSource(Source):
     name = "guardian"
     category = "news"
+    trust = 0.9
     label = "The Guardian"
     description = "Newest Guardian articles by search or section, with full article text."
     auth = AUTH_REQUIRED
