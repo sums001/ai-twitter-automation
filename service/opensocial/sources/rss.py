@@ -108,6 +108,7 @@ async def fetch_feeds(
 class RSSSource(Source):
     name = "rss"
     category = "generic"
+    trust = 0.7
     label = "RSS feeds"
     description = "Newest entries from the RSS / Atom feeds you add (news sites, blogs)."
     settings = (

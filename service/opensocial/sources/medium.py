@@ -18,6 +18,7 @@ from opensocial.sources.rss import fetch_feeds
 class MediumSource(Source):
     name = "medium"
     category = "generic"
+    trust = 0.35
     label = "Medium"
     description = "Newest Medium posts for each tag (about 10 per tag), via tag RSS feeds."
     settings = (

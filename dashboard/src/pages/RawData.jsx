@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, RefreshCw, X } from 'lucide-react';
-import { usePoll } from '../api';
+import { api, usePoll } from '../api';
+import { useApp } from '../AppContext';
 import { ago, hms } from '../utils';
 import { NICHE_COLOR, nicheLabel } from '../data';
 import { Card, EmptyState, SectionLabel, NicheTag } from '../components/common';
@@ -267,7 +268,7 @@ function ItemRow({ item, open, onToggle }) {
 
 const PAGE_SIZE = 50;
 
-export default function RawData() {
+function ItemsView() {
   const [source, setSource] = useState('');
   const [nicheSel, setNicheSel] = useState([]);
   const [query, setQuery] = useState('');
@@ -374,6 +375,175 @@ export default function RawData() {
           </PagerButton>
         </div>
       )}
+    </div>
+  );
+}
+
+// ===========================================================================
+// Knowledge base view: stories ranked for this workspace (no AI involved)
+// ===========================================================================
+const SIGNAL_LABELS = [
+  ['coverage', 'coverage'], ['freshness', 'fresh'], ['momentum', 'momentum'],
+  ['relevance', 'relevant'], ['postability', 'postable'], ['trust', 'trust'],
+];
+
+function StoryRow({ s, rank, open, onToggle }) {
+  const sig = s.signals || {};
+  const penalties = [
+    sig.novelty < 0.9 && `similar to a recent post (×${sig.novelty.toFixed(2)})`,
+    sig.variety < 1 && `same subject as a recent post (×${sig.variety})`,
+    sig.demotion < 1 && `passed over before (×${sig.demotion.toFixed(2)})`,
+  ].filter(Boolean);
+  return (
+    <div style={{ borderBottom: '1px solid #161b22' }}>
+      <div onClick={onToggle} className="lane-row" style={{ display: 'grid', gridTemplateColumns: '28px 58px 1fr auto', gap: 12, padding: '10px 14px', cursor: 'pointer', alignItems: 'center' }}>
+        <span className="os-mono" style={{ fontSize: 11, color: '#5b6470' }}>{rank}</span>
+        <span className="os-mono" style={{ fontSize: 12, fontWeight: 700, color: rank === 1 ? '#3ecf8e' : '#e7eaef' }}>{s.score.toFixed(3)}</span>
+        <span style={{ fontSize: 12.5, color: '#e7eaef', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.title}</span>
+        <span className="os-mono" style={{ fontSize: 10, color: s.outlets.length > 1 ? '#3ecf8e' : '#5b6470', textAlign: 'right', whiteSpace: 'nowrap' }}>
+          {s.outlets.length} outlet{s.outlets.length === 1 ? '' : 's'} · {nicheLabel(s.niche)}
+        </span>
+      </div>
+      {open && (
+        <div style={{ padding: '2px 14px 14px 54px', display: 'flex', flexDirection: 'column', gap: 9 }}>
+          {s.summary && <div style={{ fontSize: 12, color: '#9aa3af', lineHeight: 1.55 }}>{s.summary}</div>}
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+            {SIGNAL_LABELS.map(([k, label]) => (
+              <span key={k} className="os-mono" style={{ fontSize: 10, color: '#7a828f' }}>
+                {label} <span style={{ color: '#e7eaef' }}>{(sig[k] ?? 0).toFixed(2)}</span>
+              </span>
+            ))}
+          </div>
+          {penalties.length > 0 && (
+            <div className="os-mono" style={{ fontSize: 10, color: '#f5a524' }}>{penalties.join(' · ')}</div>
+          )}
+          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>
+            {s.outlets.join(', ')} · {s.items} item{s.items === 1 ? '' : 's'} · first seen {ago(s.first_seen)} ago
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// How long an unused story lives before it's forgotten (global setting).
+function StoryTtl({ hours, onSaved }) {
+  const [value, setValue] = useState(String(hours ?? 24));
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { if (hours != null) setValue(String(hours)); }, [hours]);
+  const n = parseInt(value, 10);
+  const dirty = Number.isFinite(n) && n >= 1 && n <= 720 && n !== hours;
+  const save = () => {
+    if (!dirty || busy) return;
+    setBusy(true);
+    api.patch('/api/settings', { story_ttl_hours: n })
+      .then(onSaved).catch((e) => alert(e.message)).finally(() => setBusy(false));
+  };
+  return (
+    <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+      <span className="os-mono" style={{ fontSize: 10, color: '#7a828f' }}>forget unused stories after</span>
+      <input
+        type="number" min="1" max="720" value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') save(); }}
+        style={{ ...selectStyle, width: 64, padding: '5px 8px', textAlign: 'center' }}
+      />
+      <span className="os-mono" style={{ fontSize: 10, color: '#7a828f' }}>h</span>
+      {dirty && (
+        <button onClick={save} style={{ border: 'none', cursor: 'pointer', fontSize: 11, fontWeight: 700, padding: '5px 10px', borderRadius: 7, background: '#3ecf8e', color: '#0a0c0f' }}>
+          {busy ? '…' : 'Save'}
+        </button>
+      )}
+    </span>
+  );
+}
+
+function StoriesView() {
+  const { withAccount } = useApp();
+  const { data, reload } = usePoll(withAccount('/api/stories?limit=40'), 15000);
+  const [open, setOpen] = useState(null);
+  const list = data ? data.shortlist : [];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span className="os-mono" style={{ fontSize: 11, color: '#7a828f', lineHeight: 1.6 }}>
+          Fetched items grouped into stories and ranked for this account, free (no AI). The next post is written from #1,
+          or the AI picks among the top few when scores are close.
+        </span>
+        <button
+          onClick={reload}
+          className="hover-border-text"
+          style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, border: '1px solid #232932', background: 'transparent', color: '#9aa3af', cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, padding: '7px 12px', borderRadius: 8 }}
+        >
+          <RefreshCw size={12} /> refresh
+        </button>
+      </div>
+
+      {data && !list.length && (
+        <EmptyState
+          title={data.total_stories ? 'Every recent story is used' : 'The knowledge base is empty'}
+          sub={data.total_stories ? 'the next post will be a synthesis take until fresh news arrives' : 'run Fetch sources for your followed niches'}
+        />
+      )}
+
+      {list.length > 0 && (
+        <Card style={{ overflow: 'hidden' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '28px 58px 1fr auto', gap: 12, padding: '11px 14px', borderBottom: '1px solid #1c212a', background: '#0d1116' }}>
+            {['#', 'SCORE', 'STORY', 'COVERAGE'].map((h, i) => (
+              <span key={h} className="os-mono" style={{ fontSize: 9, color: '#5b6470', letterSpacing: '.4px', textAlign: i === 3 ? 'right' : 'left' }}>{h}</span>
+            ))}
+          </div>
+          {list.map((s, i) => (
+            <StoryRow key={s.id} s={s} rank={i + 1} open={open === s.id} onToggle={() => setOpen(open === s.id ? null : s.id)} />
+          ))}
+        </Card>
+      )}
+
+      {data && data.used.length > 0 && (
+        <Card style={{ padding: '14px 16px' }}>
+          <SectionLabel style={{ marginBottom: 10 }}>ALREADY POSTED BY THIS ACCOUNT</SectionLabel>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+            {data.used.map((u) => (
+              <div key={u.id} style={{ display: 'flex', gap: 12, alignItems: 'baseline' }}>
+                <span className="os-mono" style={{ fontSize: 10, color: '#5b6470', width: 70, flexShrink: 0 }}>{ago(u.used_at)}</span>
+                <span style={{ fontSize: 12, color: '#9aa3af', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{u.title}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {data && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span className="os-mono" style={{ fontSize: 10, color: '#4b5563' }}>
+            {data.total_stories} stories in the shared knowledge base · niches: {data.niches.map(nicheLabel).join(', ') || 'none followed'}
+          </span>
+          <StoryTtl hours={data.story_ttl_hours} onSaved={reload} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function RawData() {
+  const [view, setView] = useState('stories');
+  const tab = (k, label) => (
+    <button
+      onClick={() => setView(k)}
+      style={{
+        border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, padding: '7px 14px', borderRadius: 7,
+        background: view === k ? '#1c222b' : 'transparent', color: view === k ? '#e7eaef' : '#7a828f',
+      }}
+    >{label}</button>
+  );
+  return (
+    <div>
+      <div style={{ display: 'inline-flex', gap: 4, padding: 3, background: '#0d1116', border: '1px solid #1c212a', borderRadius: 9, marginBottom: 16 }}>
+        {tab('stories', 'Stories')}
+        {tab('items', 'Items')}
+      </div>
+      {view === 'stories' ? <StoriesView /> : <ItemsView />}
     </div>
   );
 }

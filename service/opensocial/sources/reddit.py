@@ -71,6 +71,7 @@ def _retry_after(resp: httpx.Response) -> float | None:
 class RedditSource(Source):
     name = "reddit"
     category = "social"
+    trust = 0.4
     label = "Reddit"
     description = (
         "Hot / new / top posts from the subreddits you add, via public RSS feeds "

@@ -29,6 +29,7 @@ LIST_URL = "https://dev.to/api/articles"
 class DevToSource(Source):
     name = "devto"
     category = "tech"
+    trust = 0.35
     label = "dev.to"
     description = "Newest dev.to articles, optionally for one tag, with full article text."
     settings = (

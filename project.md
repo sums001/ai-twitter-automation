@@ -90,13 +90,10 @@ A fetch that runs nothing reports why (source turned off, required key missing, 
 
 Each niche (e.g. "crypto", "tech") is a **JSON** configuration profile under `config/niches/<slug>.json` (the source of truth; also mirrored into `niche_profiles`). It defines:
 
-- **Persona** — voice/tone/style/length and the instructions used to turn a content item into a post (instructed to write standalone text, not assuming a link will be attached).
-- **AI settings** — which text provider/model/temperature to use (`ai.text`).
+- **Persona** — style, length and custom instructions used to write posts (standalone text, never assuming a link is attached), plus optional `examples` (voice samples that override the account's).
 - **Image source** — the per-niche `image_source` field: `unsplash` (stock), `content` (the source item's own media), or `none`.
-- **Filters** — keyword blocklist, relevance keywords/threshold, max age, and near-duplicate threshold/window.
-- **Prioritization** — recency/engagement/relevance/sentiment weights and the recency half-life.
-- **Post types** — which of the seven types are enabled, with optional per-type daily caps and visual-rule overrides.
-- **Independent take** — the daily independent-post job (count, eligible types, image mode).
+- **Filters** — keyword blocklist, relevance keywords/threshold (whole-word matching; headline hits count 3x), max age, and near-duplicate threshold/window.
+- **Post types** — which of the seven tones are enabled (each tone is a post "shape").
 - **Sources** — which source plugins are enabled for this niche, with source-specific settings (subreddits, channel IDs, feed URLs, search queries, limits).
 - **Schedule** — posting time windows, posts-per-day range, and minimum gap between posts.
 - **Approval** — optional per-niche Telegram gate (`required`, `timeout_minutes`, `on_timeout`).
@@ -129,30 +126,29 @@ Cross-cutting generation rules baked into every persona prompt (these directly s
 - Respect the platform character limit, counting every URL as a flat 23 chars (t.co wrapping); one rewrite-to-fit pass before accepting an over-limit draft.
 - Strip wrapping quotes/backticks the model adds around the text.
 
-### Independent posts (e.g. the daily Take)
+### Synthesis takes (replaced the daily independent Take)
 
-Most posts are **source-derived** (built from a `content_item`). Some types can also be **independent** — generated purely from the niche persona/topic with no content item behind them (`generated_posts.content_item_id IS NULL`).
-
-A niche's `independent_take` config schedules **at least one independent post per day** (default: one `take`): a dedicated daily job asks the AI to write an original take in the niche's voice, sources or AI-generates an accompanying image, and enqueues it like any other draft. To guarantee it actually goes out (rather than losing the queue to fresher source-derived posts), one daily slot is reserved for the independent post, or it is enqueued with a priority floor. The set of independent-eligible types and the daily count are configurable.
+Posts are written from knowledge-base stories. When an account has used every recent story, the next post is a **synthesis take**: one write call reads the room across the three biggest recent stories (`generated_posts.story_id` and `content_item_id` are NULL). Only an empty knowledge base produces no post. The old per-niche `independent_take` job was removed.
 
 ---
 
 ## Pipeline / Data Flow
 
-1. **Fetch** — each enabled source is polled on its own schedule; new items are de-duplicated and stored, then linked to whichever niches they're relevant to.
-2. **Filter** — each niche applies its blocklist/keyword/age filters and a near-duplicate check against recently seen content, marking items as candidates, filtered, or duplicates.
-3. **Generate** — for each niche, the highest-priority candidates (by recency, engagement, **relevance**, and sentiment match) are assigned a post type and turned into draft post text via the niche's persona/prompt, and an image is attached per the type's visual rule. A separate daily job generates the niche's **independent post(s)** (e.g. the daily Take) with no source item behind them.
-4. **Schedule** — each niche's posting day is resolved to a set of slot times once per calendar day: a random number of slots (within the configured range) at random times within the posting windows, with the jitter **rolled once and cached** so "is this slot due yet?" doesn't flicker as the scheduler ticks. Posts are **not** pre-assigned to slots at generation time.
-5. **Publish** — when a slot fires, the engine picks the **best-scoring eligible queued post at that moment** (highest priority, respecting per-type/per-niche/global caps) rather than a pre-assigned one, so fresh high-priority content can jump the queue. If approval is required the post is sent to Telegram for review; otherwise (or once approved) it's posted to X, with the source link included or omitted per the niche's setting, and the result (success/failure, cost) is recorded. If the engine was down across slot times, it **catches up** to the number of slots that should have fired today.
+1. **Fetch** — sources are polled in one shared pass for every workspace (about 5 minutes before any account's next post, or on demand); new items are de-duplicated and stored, then linked to niches.
+2. **Filter** — each niche applies its blocklist/keyword/age filters (whole words) and a near-duplicate check, marking items candidate, filtered, or duplicate.
+3. **Knowledge base** — every item that passed a niche is grouped into a **story** (`stories`): several outlets reporting one event become one story, so coverage is a signal. Grouping uses headline word overlap plus shared names and figures; no LLM.
+4. **Shortlist** — per account, unused stories are scored for free: coverage, freshness, momentum, relevance, source trust and headline postability, discounted by similarity to what the account already posted, topic repetition, and how often the story was passed over (`story_usage`).
+5. **Pick + write** — when the account's next post is due, the top story wins outright, or one tiny AI call picks among the top few when scores are within 15%. The winner's article is fetched and reduced to a fact sheet (free), then **one** write call produces the post from the niche persona, the account's voice samples and a tone shape. Code cleans markdown, dashes, hashtags, emoji, clichés and length; a rewrite call happens only when code can't fix it. The story is marked used for that account.
+6. **Publish** — each account posts on its own cadence: inside its daily window, about every X minutes with random jitter (`next_post_at` rolled once and stored). In `auto` mode the post is published (a fresh waiting draft goes first, costing no tokens); in `manual` mode it waits in the queue, and drafting pauses once a few are waiting. The source link is included or omitted per the niche's setting, and the result (success/failure, cost) is recorded.
 
 Safety and modes (absorbed from the reference implementation):
 
 - **Dry-run by default** — publishing is live only when explicitly enabled (`POST_DRY_RUN=false`); any other value stays dry and only logs what *would* post. Fail-safe so nothing goes out by accident.
-- **`app_mode: manual | auto`** — in `manual`, the engine never publishes on its own; drafts wait in the queue until "Post now" is triggered. In `auto`, slots publish automatically.
+- **`app_mode: manual | auto`** — in `manual`, the engine never publishes on its own; it writes drafts on the cadence (up to `max_pending_drafts`) and they wait until "Post now". In `auto`, posts publish on the cadence.
 - **Posting state machine** — a failed publish increments `post_attempts` and records `post_error`; after the max attempts the draft is marked `failed`.
 - **Overlap guard** — a scheduled job that is still running when its next tick fires skips that tick rather than running twice.
 
-A global daily post cap acts as a cross-niche safety net on top of each niche's own per-type and per-niche posting limits.
+Each account's daily cap (with the global cap as a backstop) and minimum gap still apply on top of the cadence. Live mode with no X credentials holds posts rather than silently simulating them.
 
 ---
 
@@ -210,7 +206,9 @@ source_configs (
 -- Phase 3
 generated_posts (
   id                TEXT PRIMARY KEY,
-  content_item_id   TEXT REFERENCES content_items(id),  -- NULL = independent post (e.g. daily Take)
+  content_item_id   TEXT REFERENCES content_items(id),  -- the story's best item; NULL = synthesis take
+  story_id          TEXT,             -- knowledge-base story it was written from
+  platform_account_id TEXT,           -- the workspace that wrote it
   niche_slug        TEXT NOT NULL,
   post_type         TEXT NOT NULL,    -- news | spotlight | insight | take | tip | question | meme
   text              TEXT NOT NULL,
@@ -222,7 +220,7 @@ generated_posts (
   status            TEXT NOT NULL,    -- draft | published | rejected | failed
                                       -- (the optional Telegram approval gate is handled by
                                       -- approval.py, not a separate status)
-  priority_score    REAL,             -- carried from the candidate queue so the publisher can pick the best at slot time
+  priority_score    REAL,             -- the story's shortlist score when it was written
   scheduled_at      DATETIME,
   post_attempts     INTEGER NOT NULL DEFAULT 0,
   post_error        TEXT,
@@ -278,12 +276,43 @@ logs (
   logged_at DATETIME NOT NULL
 )
 
+-- Knowledge base (shared stories + per-workspace memory)
+stories (
+  id                TEXT PRIMARY KEY,
+  title             TEXT NOT NULL,     -- headline of the most trusted outlet
+  summary           TEXT,
+  best_item_id      TEXT,              -- fetched for full text / media passthrough
+  first_seen_at     DATETIME NOT NULL,
+  last_seen_at      DATETIME NOT NULL,
+  updated_at        DATETIME NOT NULL,
+  item_count        INTEGER NOT NULL,
+  outlets           JSON NOT NULL,     -- distinct outlets (coverage)
+  niche_relevance   JSON NOT NULL,     -- {niche_slug: best relevance}
+  tokens            JSON NOT NULL,     -- headline token sets used for matching
+  entities          JSON NOT NULL,     -- names/tickers ('#'-prefixed figures)
+  trust             REAL NOT NULL,     -- best source trust (Source.trust)
+  recent_item_times JSON NOT NULL      -- for momentum
+)
+-- content_items.story_id links each grouped item to its story.
+
+story_usage (
+  story_id            TEXT REFERENCES stories(id),
+  platform_account_id TEXT,            -- per workspace
+  status              TEXT NOT NULL,   -- used | shown
+  times_shown         INTEGER NOT NULL,-- shortlisted without winning (fades the score)
+  last_shown_at       DATETIME,
+  used_at             DATETIME,
+  generated_post_id   TEXT,
+  PRIMARY KEY (story_id, platform_account_id)
+)
+
 -- Runtime settings the dashboard can change without a service restart, plus
 -- Fernet-encrypted secrets saved from the dashboard. resolve_settings() overlays
 -- these on top of the environment each scheduler tick.
 app_settings (
-  key   TEXT PRIMARY KEY,   -- dry_run | app_mode | global_daily_cap |
-                            -- autopilot_fetch_minutes | secret:<ENV_NAME> | ...
+  key   TEXT PRIMARY KEY,   -- dry_run | app_mode | global_daily_cap | secret:<ENV_NAME> |
+                            -- ws:<id>:cadence | ws:<id>:next_post_at | ws:<id>:voice_samples |
+                            -- kb_last_fetch | ...
   value TEXT NOT NULL
 )
 ```
@@ -294,9 +323,9 @@ app_settings (
 
 The web dashboard is a **React + Vite** app (`dashboard/`). It does **not** touch SQLite directly (the original plan had it sharing the file); instead it calls the service's FastAPI backend over HTTP. The backend (`opensocial/api.py`, started by `opensocial serve`) serves reads from the DB, applies fast state changes synchronously, and routes slow actions through the `commands` queue to the background worker.
 
-Pages: **Dashboard** (overview), **Niches** (full per-niche config editor), **Queue** (draft posts — approve/reject/edit), **Schedule** (slot times, randomize), **Sources** (per-source toggles, settings, credentials), **History** (publish history + cost), **Logs** (mirrored service logs), **Settings** (dry-run/app-mode/caps, secrets), **RawData** (stored content items).
+Pages: **Dashboard** (overview), **Niches** (full per-niche config editor), **Queue** (draft posts — approve/reject/edit), **Schedule** (the account's window, post-every-X-minutes, jitter, safety limits, today's timeline), **Sources** (per-source toggles, settings, credentials), **History** (publish history + cost), **Logs** (mirrored service logs), **Settings** (dry-run/app-mode, voice samples, caps, secrets), **RawData** (knowledge-base stories as ranked for the account, plus raw items).
 
-Key API groups (`/api/*`): `status`/`settings`/`overview`, `niches` (+ `followed`, `schedule`, `randomize`), `posts` (+ approve/reject/edit), `content`, `history`, `logs`, `sources` (+ origins), `ai`, `commands`, `credentials`.
+Key API groups (`/api/*`): `status`/`settings`/`overview`, `niches` (+ `followed`), `schedule` (account cadence), `voice`, `stories`, `posts` (+ approve/reject/edit), `content`, `history`, `logs`, `sources` (+ origins), `ai`, `commands`, `credentials`.
 
 ---
 

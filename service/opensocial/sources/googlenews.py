@@ -41,6 +41,7 @@ def build_feed_url(
 class GoogleNewsSource(Source):
     name = "googlenews"
     category = "news"
+    trust = 0.75
     label = "Google News"
     description = (
         "Google News headlines for a search query, with the outlet name. "

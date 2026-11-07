@@ -23,10 +23,6 @@ class Settings:
     global_daily_cap: int
     max_post_attempts: int
     secret_key: str | None
-    # Autopilot fetch cadence (minutes). In auto mode the worker refreshes the
-    # draft queue this often, but only inside the day's posting window. 0 (or
-    # negative) disables the timed refresh entirely.
-    autopilot_fetch_minutes: int = 30
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -46,9 +42,6 @@ class Settings:
             global_daily_cap=int(os.environ.get("GLOBAL_DAILY_CAP", "25")),
             max_post_attempts=int(os.environ.get("MAX_POST_ATTEMPTS", "3")),
             secret_key=os.environ.get("OPENSOCIAL_SECRET_KEY"),
-            autopilot_fetch_minutes=int(
-                os.environ.get("AUTOPILOT_FETCH_MINUTES", "30")
-            ),
         )
 
 
@@ -139,7 +132,8 @@ def resolve_settings(session, workspace_id: str | None = None) -> Settings:
 
     ``dry_run`` and ``app_mode`` are **per workspace** (``ws:<id>:…`` with a
     legacy global fallback) so each workspace publishes on its own terms. The
-    fetch cadence and global cap stay global, and ``secret_key`` is global. The
+    global cap and ``secret_key`` are global (the posting cadence lives in
+    ``core/scheduler.py``). The
     same fail-safe applies: dry-run only switches off on an explicit "false".
     """
     from dataclasses import replace
@@ -160,13 +154,6 @@ def resolve_settings(session, workspace_id: str | None = None) -> Settings:
     if cap is not None:
         try:
             base = replace(base, global_daily_cap=max(0, int(cap)))
-        except (TypeError, ValueError):
-            pass
-
-    fetch_min = get_app_setting(session, "autopilot_fetch_minutes")
-    if fetch_min is not None:
-        try:
-            base = replace(base, autopilot_fetch_minutes=max(0, int(fetch_min)))
         except (TypeError, ValueError):
             pass
 
@@ -325,3 +312,44 @@ def set_followed_niches(
             seen.append(s)
     set_scoped_setting(session, workspace_id, "followed_niches", json.dumps(seen))
     return seen
+
+
+# ---------------------------------------------------------------------------
+# Voice samples (per workspace: one X account has one voice)
+# ---------------------------------------------------------------------------
+#
+# Real posts the writer imitates for rhythm, casing and formatting. Stored as a
+# JSON list under ``ws:<id>:voice_samples``. Unset means the shipped defaults
+# (``ai/prompts.DEFAULT_VOICE_SAMPLES``); an explicitly saved empty list means
+# "no samples". A niche can override them with ``persona.examples``.
+
+MAX_VOICE_SAMPLES = 8
+MAX_SAMPLE_CHARS = 600
+
+
+def get_voice_samples(session, workspace_id: str | None) -> tuple[list[str], bool]:
+    """Return ``(samples, is_default)`` for a workspace."""
+    from opensocial.ai.prompts import DEFAULT_VOICE_SAMPLES
+
+    raw = get_scoped_setting(session, workspace_id, "voice_samples")
+    if raw is None:
+        return list(DEFAULT_VOICE_SAMPLES), True
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return list(DEFAULT_VOICE_SAMPLES), True
+    if not isinstance(value, list):
+        return list(DEFAULT_VOICE_SAMPLES), True
+    return [str(v) for v in value if isinstance(v, str) and v.strip()], False
+
+
+def set_voice_samples(session, workspace_id: str | None, samples: list[str]) -> list[str]:
+    """Persist a workspace's voice samples (trimmed, capped, blanks dropped)."""
+    clean = []
+    for s in samples or []:
+        text = str(s).strip()
+        if text and text not in clean:
+            clean.append(text[:MAX_SAMPLE_CHARS])
+    clean = clean[:MAX_VOICE_SAMPLES]
+    set_scoped_setting(session, workspace_id, "voice_samples", json.dumps(clean))
+    return clean

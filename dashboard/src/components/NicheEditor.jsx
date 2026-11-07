@@ -1,23 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '../AppContext';
-import { NICHE_COLOR, nicheLabel, TYPE_COLORS } from '../data';
+import { NICHE_COLOR, nicheLabel } from '../data';
 import { api } from '../api';
 import { Card, Toggle } from './common';
-
-const POST_TYPES = ['news', 'spotlight', 'insight', 'take', 'tip', 'question', 'meme'];
-// Tones allowed for independent takes (mirrors INDEPENDENT_ELIGIBLE in core/posttypes.py).
-const INDEPENDENT_TONES = ['insight', 'take', 'tip', 'question', 'meme'];
-// Short blurb per tone — the angle/voice a draft is written in. One enabled tone
-// is assigned at random per post (shuffled rotation) so the feed varies.
-const TONE_BLURBS = {
-  news: 'timely development, why it matters',
-  spotlight: 'highlight a tool / repo / product',
-  insight: 'a non-obvious observation',
-  take: 'a bold, opinionated stance',
-  tip: 'one actionable how-to',
-  question: 'provoke debate, open question',
-  meme: 'witty, relatable one-liner',
-};
 
 // Per-niche post text controls (Voice column).
 const POST_STYLES = [
@@ -132,11 +117,6 @@ function Field({ title, hint, right, children }) {
 // Column 1 — who the niche is and how its posts sound.
 function VoiceColumn({ cfg, set, color }) {
   const persona = cfg.persona || {};
-  const textarea = {
-    width: '100%', boxSizing: 'border-box', colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a',
-    borderRadius: 10, padding: 12, fontSize: 13, lineHeight: 1.55, color: '#d5dae1',
-    fontFamily: 'inherit', resize: 'vertical',
-  };
   return (
     <div>
       <div style={colTitle}>Voice</div>
@@ -147,54 +127,37 @@ function VoiceColumn({ cfg, set, color }) {
           style={{ ...inputStyle, width: '100%', boxSizing: 'border-box' }}
         />
       </Field>
-      <Field title="Post style">
+      <Field title="Post style" hint="the voice every post is written in">
         <SelectGrid options={POST_STYLES} value={persona.style || ''} onChange={(v) => set(['persona', 'style'], v)} color={color} cols={2} />
       </Field>
       <Field title="Post length">
         <SelectGrid options={POST_LENGTHS} value={persona.length || ''} onChange={(v) => set(['persona', 'length'], v)} color={color} cols={2} />
       </Field>
-      <Field title="Custom instructions" hint="optional · appended to every generation prompt">
-        <textarea
-          value={persona.instructions || ''}
-          onChange={(e) => set(['persona', 'instructions'], e.target.value)}
-          rows={3}
-          placeholder={`e.g. Always include a concrete example for ${nicheLabel(cfg.slug)}…`}
-          style={textarea}
-        />
-      </Field>
     </div>
   );
 }
 
-// Column 2 — what kinds of posts get written, and their images.
+// Column 2 — extra guidance, images, and an optional voice override.
 function ContentColumn({ cfg, set }) {
-  const pt = cfg.post_types || {};
-  const ind = cfg.independent_take || {};
-  const indOn = !!cfg.independent_take && ind.enabled !== false;
-  const indTypes = ind.types || [];
-  const toneOn = (t) => !!pt[t] && (pt[t] || {}).enabled !== false;
-  const toggleIndType = (t) =>
-    set(['independent_take', 'types'], indTypes.includes(t) ? indTypes.filter((x) => x !== t) : [...indTypes, t]);
-  const toneChip = (t, on, onClick) => (
-    <button
-      key={t}
-      onClick={onClick}
-      title={TONE_BLURBS[t]}
-      style={{
-        ...chip(on ? TYPE_COLORS[t][0] : '#5b6470', on ? TYPE_COLORS[t][1] : 'transparent', on ? '1px solid transparent' : '1px solid #2a313c'),
-        cursor: 'pointer',
-      }}
-    >
-      {t}
-    </button>
-  );
+  const persona = cfg.persona || {};
+  // Optional per-niche voice samples, edited as one text block split on '---'.
+  const examples = Array.isArray(persona.examples) ? persona.examples : [];
+  const textarea = {
+    width: '100%', boxSizing: 'border-box', colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a',
+    borderRadius: 10, padding: 12, fontSize: 13, lineHeight: 1.55, color: '#d5dae1',
+    fontFamily: 'inherit', resize: 'vertical',
+  };
   return (
     <div>
       <div style={colTitle}>Content</div>
-      <Field title="Tones" hint="one enabled tone is picked per post · none = all">
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {POST_TYPES.map((t) => toneChip(t, toneOn(t), () => set(['post_types', t, 'enabled'], !toneOn(t))))}
-        </div>
+      <Field title="Custom instructions" hint="optional · appended to every generation prompt">
+        <textarea
+          value={persona.instructions || ''}
+          onChange={(e) => set(['persona', 'instructions'], e.target.value)}
+          rows={4}
+          placeholder={`e.g. Always include a concrete example for ${nicheLabel(cfg.slug)}…`}
+          style={textarea}
+        />
       </Field>
       <Field title="Image source" hint="where post images come from">
         <select
@@ -208,25 +171,19 @@ function ContentColumn({ cfg, set }) {
         </select>
       </Field>
       <Field
-        title="Independent takes"
-        hint="original posts not tied to a source item"
-        right={<Toggle on={indOn} onClick={() => set(['independent_take', 'enabled'], !indOn)} size={19} />}
+        title="Voice override"
+        hint="optional · this niche's own sample posts, separated by a line with ---; empty uses the account's samples (Settings → General)"
       >
-        {indOn && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span className="os-mono" style={{ fontSize: 11, color: '#9aa3af' }}>per day</span>
-              <input
-                type="number" min="0" max="6" value={ind.per_day != null ? ind.per_day : 1}
-                onChange={(e) => set(['independent_take', 'per_day'], +e.target.value)}
-                style={{ ...numStyle, width: 64, padding: '5px 8px' }}
-              />
-            </div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {INDEPENDENT_TONES.map((t) => toneChip(t, indTypes.includes(t), () => toggleIndType(t)))}
-            </div>
-          </div>
-        )}
+        <textarea
+          value={examples.join('\n---\n')}
+          onChange={(e) => {
+            const parts = e.target.value.split(/\n-{3,}\n/);
+            set(['persona', 'examples'], parts.every((x) => !x.trim()) ? [] : parts);
+          }}
+          rows={4}
+          placeholder={'a post this niche should sound like\n---\nanother one'}
+          style={textarea}
+        />
       </Field>
     </div>
   );

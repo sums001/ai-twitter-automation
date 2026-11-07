@@ -29,6 +29,7 @@ API_URL = "https://export.arxiv.org/api/query"
 class ArxivSource(Source):
     name = "arxiv"
     category = "science"
+    trust = 0.6
     label = "arXiv"
     description = "Newest arXiv research papers for a search query (title and abstract)."
     settings = (

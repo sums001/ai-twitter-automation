@@ -31,6 +31,7 @@ from opensocial.sources.base import (
 class YouTubeSource(Source):
     name = "youtube"
     category = "video"
+    trust = 0.4
     label = "YouTube"
     description = "Newest videos per channel or search, with their transcripts."
     auth = AUTH_REQUIRED

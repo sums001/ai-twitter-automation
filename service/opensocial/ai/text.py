@@ -152,6 +152,10 @@ def get_text_provider(config: dict | None) -> TextProvider:
     model = ai.get("model") or PROVIDER_MODEL_DEFAULTS.get(provider, "ollama/llama3")
     endpoint = ai.get("endpoint") or None
     api_key = ai.get("api_key") or None  # per-workspace key injected by callers
+    if provider == "local" and not api_key:
+        # OpenAI-compatible local servers (``openai/<model>``) still make the
+        # OpenAI client demand a key; they ignore its value. Ollama ignores it too.
+        api_key = "local"
     params = {k: v for k, v in ai.items() if k in ("temperature", "max_tokens")}
     try:
         import litellm  # noqa: F401

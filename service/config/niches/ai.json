@@ -31,13 +31,6 @@
     "dup_threshold": 0.8,
     "dup_window_days": 3
   },
-  "prioritization": {
-    "recency_weight": 0.4,
-    "engagement_weight": 0.25,
-    "relevance_weight": 0.2,
-    "sentiment_weight": 0.15,
-    "half_life_hours": 24
-  },
   "sources": {
     "arxiv": {
       "query": "cat:cs.AI OR cat:cs.LG OR cat:cs.CL",
@@ -64,23 +57,5 @@
     "style": "informative",
     "length": "short"
   },
-  "independent_take": {
-    "types": [],
-    "enabled": false,
-    "image": "ai"
-  },
-  "image_source": "unsplash",
-  "schedule": {
-    "windows": [
-      [
-        "09:00",
-        "21:00"
-      ]
-    ],
-    "posts_per_day": [
-      1,
-      1
-    ],
-    "min_gap_minutes": 45
-  }
+  "image_source": "unsplash"
 }

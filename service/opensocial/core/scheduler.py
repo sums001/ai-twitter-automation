@@ -1,131 +1,272 @@
-"""Slot resolution with cached daily jitter (pure functions).
+"""Per-account posting cadence: a daily window, "every X minutes", jitter.
 
-A niche's posting day is resolved to a set of slot times **once per calendar
-day**: a random number of slots (within the configured range) at random times
-inside the posting windows. The randomness is seeded by ``(niche, date)`` so
-recomputing on every scheduler tick yields the *same* slots — the jitter is
-effectively "rolled once and cached" without persisting anything, so
-"is this slot due yet?" never flickers.
+Each workspace (= X account) posts on its own rhythm: inside its posting
+window, one post roughly every ``every_minutes``, each gap randomized by
+``jitter_pct`` so the timing never looks robotic. The next post time is rolled
+once and stored (``ws:<id>:next_post_at``), so it is stable across worker
+ticks and visible on the dashboard.
 
-Posts are **not** pre-assigned to slots here; the publish engine picks the
-best-scoring queued post when a slot is due. The minimum gap and caps are
-enforced at publish time, not baked into slot times.
+Safety limits ride along: ``min_gap_minutes`` (never two posts closer than
+this, even when posting manually) and, in manual mode, ``max_pending_drafts``
+(stop drafting once this many drafts await review, so an idle queue costs no
+tokens). The per-account daily cap lives on the account itself.
+
+Pure functions plus tiny load/save helpers over ``app_settings``.
 """
 
 from __future__ import annotations
 
-import hashlib
+import json
 import random
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta, timezone, tzinfo
+
+DEFAULT_WINDOW = ("09:00", "21:00")
 
 
 @dataclass
-class ScheduleConfig:
-    windows: list[tuple[time, time]] = field(default_factory=list)
-    posts_per_day: tuple[int, int] = (1, 3)
-    min_gap_minutes: int = 45
+class Cadence:
+    window: tuple[str, str] = DEFAULT_WINDOW
+    every_minutes: int = 60
+    jitter_pct: int = 20
+    min_gap_minutes: int = 20
+    max_pending_drafts: int = 3
+
+    def validate(self) -> "Cadence":
+        start, end = self.window
+        if _parse_hm(start) >= _parse_hm(end):
+            raise ValueError("window start must be before end")
+        if not 5 <= int(self.every_minutes) <= 24 * 60:
+            raise ValueError("every_minutes must be between 5 and 1440")
+        if not 0 <= int(self.jitter_pct) <= 50:
+            raise ValueError("jitter_pct must be between 0 and 50")
+        if not 0 <= int(self.min_gap_minutes) <= 24 * 60:
+            raise ValueError("min_gap_minutes must be between 0 and 1440")
+        if not 1 <= int(self.max_pending_drafts) <= 50:
+            raise ValueError("max_pending_drafts must be between 1 and 50")
+        return self
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["window"] = list(self.window)
+        return d
 
     @classmethod
-    def from_niche(cls, raw: dict) -> "ScheduleConfig":
-        s = (raw or {}).get("schedule")
-        # A niche with no ``schedule`` block is simply not on the schedule:
-        # no windows → no slots → the engine never auto-publishes it.
-        if not s:
-            return cls(windows=[], posts_per_day=(0, 0), min_gap_minutes=45)
-        windows: list[tuple[time, time]] = []
-        for win in s.get("windows", [["09:00", "21:00"]]):
-            start, end = win
-            windows.append((_parse_hm(start), _parse_hm(end)))
-        ppd = s.get("posts_per_day", [1, 3])
-        if isinstance(ppd, int):
-            ppd = [ppd, ppd]
+    def from_dict(cls, data: dict) -> "Cadence":
+        base = cls()
+        win = data.get("window") or base.window
         return cls(
-            windows=windows or [(_parse_hm("09:00"), _parse_hm("21:00"))],
-            posts_per_day=(int(ppd[0]), int(ppd[1])),
-            min_gap_minutes=int(s.get("min_gap_minutes", 45)),
+            window=(str(win[0]), str(win[1])),
+            every_minutes=int(data.get("every_minutes", base.every_minutes)),
+            jitter_pct=int(data.get("jitter_pct", base.jitter_pct)),
+            min_gap_minutes=int(data.get("min_gap_minutes", base.min_gap_minutes)),
+            max_pending_drafts=int(data.get("max_pending_drafts", base.max_pending_drafts)),
         )
 
 
 def _parse_hm(value: str) -> time:
     hh, mm = (int(x) for x in value.split(":"))
-    # The dashboard's timeline ends at "24:00" (the right edge), but
-    # ``datetime.time`` tops out at 23:59 — clamp end-of-day to the last
-    # minute so a window ending at midnight resolves instead of crashing.
+    # "24:00" (the timeline's right edge) clamps to the last minute of the day.
     if hh >= 24:
         return time(23, 59)
     return time(min(hh, 23), min(mm, 59))
 
 
-def _seed(niche_slug: str, day: datetime, tz: tzinfo | None = None) -> int:
-    key = f"{niche_slug}:{day.astimezone(tz).date().isoformat()}"
-    return int(hashlib.sha256(key.encode()).hexdigest(), 16) % (2**32)
+def window_bounds(cadence: Cadence, day: datetime, tz: tzinfo | None = None) -> tuple[datetime, datetime]:
+    """Today's window (tz-aware) for the calendar day of ``day`` in ``tz``."""
+    local = day.astimezone(tz)
+    base = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_t, end_t = (_parse_hm(v) for v in cadence.window)
+    return (
+        base.replace(hour=start_t.hour, minute=start_t.minute),
+        base.replace(hour=end_t.hour, minute=end_t.minute),
+    )
 
 
-def resolve_slots(
-    cfg: ScheduleConfig,
-    niche_slug: str,
-    day: datetime | None = None,
+def in_window(cadence: Cadence, now: datetime, tz: tzinfo | None = None) -> bool:
+    start, end = window_bounds(cadence, now, tz)
+    return start <= now.astimezone(tz) <= end
+
+
+def _hm_minutes(value: str) -> int:
+    t = _parse_hm(value)
+    return t.hour * 60 + t.minute
+
+
+def slot_minutes(cadence: Cadence) -> list[float]:
+    """The day's post slots, as minutes after midnight: evenly spaced in the window.
+
+    The window is cut into ``round(length / every_minutes)`` equal parts and a
+    slot sits in the middle of each, so the posts spread across the whole
+    window (start to end) at roughly the requested rhythm.
+    """
+    start = _hm_minutes(cadence.window[0])
+    end = _hm_minutes(cadence.window[1])
+    length = end - start
+    if length <= 0:
+        return []
+    n = max(1, round(length / cadence.every_minutes))
+    step = length / n
+    return [start + step * (i + 0.5) for i in range(n)]
+
+
+def _slot_step(cadence: Cadence) -> float:
+    slots = slot_minutes(cadence)
+    if len(slots) > 1:
+        return slots[1] - slots[0]
+    start, end = (_hm_minutes(v) for v in cadence.window)
+    return float(max(end - start, 1))
+
+
+def _slot_times(cadence: Cadence, day: datetime, tz: tzinfo | None) -> list[datetime]:
+    """Slot datetimes (tz-aware) for the calendar day of ``day`` in ``tz``."""
+    base = day.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    return [base + timedelta(minutes=m) for m in slot_minutes(cadence)]
+
+
+def _next_slot(cadence: Cadence, after: datetime, tz: tzinfo | None, days: int = 3) -> datetime | None:
+    """The first slot strictly after ``after`` (unjittered), looking a few days ahead."""
+    for d in range(days):
+        for t in _slot_times(cadence, after + timedelta(days=d), tz):
+            if t > after:
+                return t
+    return None
+
+
+def _jittered(cadence: Cadence, slot: datetime, not_before: datetime, tz, rng: random.Random) -> datetime:
+    """Nudge a slot by up to ``±jitter_pct`` of half the spacing (neighbours never cross)."""
+    j = cadence.jitter_pct / 100.0
+    offset = timedelta(minutes=_slot_step(cadence) / 2 * rng.uniform(-j, j))
+    start, end = window_bounds(cadence, slot, tz)
+    t = min(max(slot + offset, start), end)
+    return max(t, not_before).astimezone(timezone.utc)
+
+
+def first_post_time(
+    cadence: Cadence, now: datetime, tz: tzinfo | None = None, rng: random.Random | None = None
+) -> datetime:
+    """When to post first, given no (or a stale) schedule: the next slot from now."""
+    rng = rng or random.Random()
+    slot = _next_slot(cadence, now, tz)
+    return _jittered(cadence, slot, now + timedelta(minutes=1), tz, rng)
+
+
+def next_post_time(
+    cadence: Cadence, after: datetime, tz: tzinfo | None = None, rng: random.Random | None = None
+) -> datetime:
+    """The post after one at ``after``: the next slot the clock reaches.
+
+    ``after`` may be a little early or late against its own slot (jitter), so
+    the search starts half a spacing later and never lands on the same slot.
+    """
+    rng = rng or random.Random()
+    slot = _next_slot(cadence, after + timedelta(minutes=_slot_step(cadence) / 2), tz)
+    return _jittered(cadence, slot, after + timedelta(minutes=1), tz, rng)
+
+
+def projected_times(
+    cadence: Cadence,
+    next_at: datetime | None,
+    now: datetime,
     tz: tzinfo | None = None,
+    *,
+    days: int = 2,
 ) -> list[datetime]:
-    """Return today's posting slot times (tz-aware, sorted), stable across ticks.
+    """Upcoming post times for display: ``next_at``, then the following slots.
 
-    Windows are interpreted in ``tz`` — a "09:00" window means 9 AM there, which
-    is also what the dashboard displays. ``tz=None`` falls back to the
-    **server's local timezone** (the historical behaviour). A deterministic
-    per-day RNG picks the slot count and spreads the slots across the posting
-    windows by bucketing the available time, so slots are naturally spaced and
-    reproducible. The per-day seed uses ``tz``'s calendar day, so the slot set
-    rolls over at local midnight in the configured zone.
+    Covers today and the following ``days - 1`` days in ``tz``.
     """
-    day = (day or datetime.now(timezone.utc)).astimezone(tz)
-    rng = random.Random(_seed(niche_slug, day, tz))
-
-    # Build concrete (start, end) datetime windows for this calendar day.
-    base = day.replace(hour=0, minute=0, second=0, microsecond=0)
-    spans: list[tuple[datetime, datetime]] = []
-    for start_t, end_t in cfg.windows:
-        start = base.replace(hour=start_t.hour, minute=start_t.minute)
-        end = base.replace(hour=end_t.hour, minute=end_t.minute)
-        if end > start:
-            spans.append((start, end))
-    if not spans:
+    if next_at is None:
         return []
-
-    total_seconds = sum((e - s).total_seconds() for s, e in spans)
-    lo, hi = cfg.posts_per_day
-    count = rng.randint(min(lo, hi), max(lo, hi))
-    if count <= 0 or total_seconds <= 0:
-        return []
-
-    # Bucket the concatenated timeline into `count` equal segments and pick a
-    # random instant within each, so slots are spread out across the day.
-    segment = total_seconds / count
-    slots: list[datetime] = []
-    for i in range(count):
-        offset = (i + rng.random()) * segment
-        slots.append(_offset_to_time(spans, offset))
-    return sorted(slots)
+    last_day = now.astimezone(tz).date() + timedelta(days=days - 1)
+    out = [next_at.astimezone(timezone.utc)]
+    t = next_at + timedelta(minutes=_slot_step(cadence) / 2)
+    while len(out) < 200:
+        slot = _next_slot(cadence, t, tz)
+        if slot is None or slot.date() > last_day:
+            break
+        out.append(slot.astimezone(timezone.utc))
+        t = slot
+    return out
 
 
-def _offset_to_time(spans: list[tuple[datetime, datetime]], offset: float) -> datetime:
-    """Map a seconds-offset into the concatenated windows to a real datetime."""
-    for start, end in spans:
-        span = (end - start).total_seconds()
-        if offset <= span:
-            return start + timedelta(seconds=offset)
-        offset -= span
-    # Clamp to the end of the last window.
-    return spans[-1][1]
+# ---------------------------------------------------------------------------
+# Storage (per workspace, in app_settings)
+# ---------------------------------------------------------------------------
 
 
-def due_slot_count(slots: list[datetime], now: datetime, grace: timedelta) -> int:
-    """Slots that came due within the last ``grace`` (no older catch-up).
+def _seed_window(session, workspace_id: str | None, config_dir) -> tuple[str, str]:
+    """Pre-cadence installs kept windows per niche: span them as the default."""
+    if config_dir is None:
+        return DEFAULT_WINDOW
+    from opensocial.core.config import load_all_niches
+    from opensocial.core.settings import get_followed_niches
 
-    A slot is "due now" only if its time fell inside ``(now - grace, now]``.
-    Slots older than that are treated as missed and skipped, so enabling
-    autopilot mid-day never replays a backlog.
-    """
-    now = now.astimezone(timezone.utc)
-    lower = now - grace
-    return sum(1 for s in slots if lower < s <= now)
+    followed = set(get_followed_niches(session, workspace_id))
+    starts, ends = [], []
+    for n in load_all_niches(config_dir):
+        sched = (n.raw or {}).get("schedule") or {}
+        if n.slug not in followed or not sched.get("windows"):
+            continue
+        for start, end in sched["windows"]:
+            starts.append(start)
+            ends.append(end)
+    if not starts:
+        return DEFAULT_WINDOW
+    return min(starts), max(ends)
+
+
+def load_cadence(session, workspace_id: str | None, *, config_dir=None) -> Cadence:
+    """A workspace's cadence (stored JSON, else defaults seeded from legacy config)."""
+    from opensocial.core.db import get_app_setting
+    from opensocial.core.settings import get_scoped_setting
+
+    raw = get_scoped_setting(session, workspace_id, "cadence")
+    if raw:
+        try:
+            return Cadence.from_dict(json.loads(raw))
+        except (TypeError, ValueError, IndexError, KeyError):
+            pass
+    cadence = Cadence(window=_seed_window(session, workspace_id, config_dir))
+    # The old global "fetch every X minutes" setting was the autopilot rhythm.
+    legacy = get_app_setting(session, "autopilot_fetch_minutes")
+    if legacy and legacy.isdigit() and int(legacy) >= 5:
+        cadence.every_minutes = int(legacy)
+    return cadence
+
+
+def save_cadence(session, workspace_id: str | None, cadence: Cadence) -> Cadence:
+    from opensocial.core.settings import set_scoped_setting
+
+    cadence.validate()
+    set_scoped_setting(session, workspace_id, "cadence", json.dumps(cadence.to_dict()))
+    # A new rhythm takes effect from now: forget the old rolled time.
+    clear_next_post_at(session, workspace_id)
+    return cadence
+
+
+def get_next_post_at(session, workspace_id: str | None) -> datetime | None:
+    from opensocial.core.settings import get_scoped_setting
+
+    raw = get_scoped_setting(session, workspace_id, "next_post_at") if workspace_id else None
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def set_next_post_at(session, workspace_id: str | None, when: datetime) -> None:
+    from opensocial.core.settings import set_scoped_setting
+
+    set_scoped_setting(
+        session, workspace_id, "next_post_at", when.astimezone(timezone.utc).isoformat()
+    )
+
+
+def clear_next_post_at(session, workspace_id: str | None) -> None:
+    from opensocial.core.settings import set_scoped_setting
+
+    set_scoped_setting(session, workspace_id, "next_post_at", "")

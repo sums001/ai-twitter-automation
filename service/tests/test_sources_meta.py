@@ -40,6 +40,9 @@ def test_every_source_describes_itself():
         if cls.origin_key:
             assert cls.origin_label, name
             assert any(s.name == cls.origin_key for s in cls.settings), name
+        # every plugin rates its own trust for story ranking (not the default)
+        assert "trust" in vars(cls), f"{name} doesn't set trust"
+        assert 0.0 < cls.trust <= 1.0, name
 
 
 def test_removed_sources_are_gone():

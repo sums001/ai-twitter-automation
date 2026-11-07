@@ -1,7 +1,7 @@
 """Dashboard HTTP API tests (FastAPI TestClient — no server, no network).
 
 Covers the runtime-settings overlay, the read endpoints' shapes, the approval
-transitions over HTTP, niche config + schedule writes, source toggles, the
+transitions over HTTP, niche config, the account cadence, voice samples, the knowledge base, source toggles, the
 command queue, and credential storage (env secrets + X account enrollment).
 """
 
@@ -225,66 +225,80 @@ def test_overview_funnel_hides_untracked_niches(client, tmp_path):
     assert "off" not in slugs    # has source but not selected
 
 
-def test_schedule_resolves_slots(client):
-    body = client.get("/api/schedule").json()
-    lane = next(n for n in body["niches"] if n["slug"] == NICHE)
-    assert lane["posts_per_day"] == [2, 2]
-    assert len(lane["slots"]) == 2  # fixed range resolves exactly 2 slots
-    assert lane["windows"] == [["09:00", "12:00"]]
+def _account(client, label="main"):
+    return client.post("/api/accounts", json={"label": label}).json()["id"]
 
 
-def test_schedule_put_writes_config(client, tmp_path):
+def test_schedule_returns_account_cadence(client):
+    acct = _account(client)
+    client.put(f"/api/niches/followed?account={acct}", json={"slugs": [NICHE]})
+    body = client.get(f"/api/schedule?account={acct}").json()
+    # Seeded from the followed niche's legacy window on first read.
+    assert body["cadence"]["window"] == ["09:00", "12:00"]
+    assert body["cadence"]["every_minutes"] == 60
+    assert body["mode"] == "manual" and body["dry_run"] is True
+    assert body["posted_today"] == [] and body["pending_drafts"] == 0
+    assert len(body["window_today"]) == 2
+
+
+def test_schedule_put_saves_cadence_and_validates(client):
+    acct = _account(client)
     res = client.put(
-        f"/api/niches/{NICHE}/schedule",
-        json={"windows": [["08:00", "10:00"]], "posts_per_day": [1, 4], "min_gap_minutes": 50},
+        f"/api/schedule?account={acct}",
+        json={"window": ["08:00", "22:00"], "every_minutes": 30, "jitter_pct": 25,
+              "min_gap_minutes": 15, "max_pending_drafts": 4},
     )
     assert res.status_code == 200
-    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
-    assert on_disk["schedule"]["windows"] == [["08:00", "10:00"]]
-    assert on_disk["schedule"]["posts_per_day"] == [1, 4]
-    # bad window format rejected
-    assert client.put(
-        f"/api/niches/{NICHE}/schedule",
-        json={"windows": [["8am", "10"]], "posts_per_day": [1, 2], "min_gap_minutes": 5},
-    ).status_code == 422
+    cad = res.json()["cadence"]
+    assert cad == {"window": ["08:00", "22:00"], "every_minutes": 30, "jitter_pct": 25,
+                   "min_gap_minutes": 15, "max_pending_drafts": 4}
+    assert client.get(f"/api/schedule?account={acct}").json()["cadence"]["every_minutes"] == 30
+    bad = {"window": ["22:00", "08:00"], "every_minutes": 30}
+    assert client.put(f"/api/schedule?account={acct}", json=bad).status_code == 422
+    bad = {"window": ["8am", "10"], "every_minutes": 30}
+    assert client.put(f"/api/schedule?account={acct}", json=bad).status_code == 422
+    bad = {"window": ["08:00", "22:00"], "every_minutes": 1}
+    assert client.put(f"/api/schedule?account={acct}", json=bad).status_code == 422
 
 
-def test_schedule_only_includes_scheduled_niches(client, tmp_path):
-    # Dropping the schedule block takes the niche off the schedule entirely.
-    res = client.delete(f"/api/niches/{NICHE}/schedule")
-    assert res.status_code == 200
-    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
-    assert "schedule" not in on_disk
-    body = client.get("/api/schedule").json()
-    assert all(n["slug"] != NICHE for n in body["niches"])
+def test_old_per_niche_schedule_endpoints_are_gone(client):
+    assert client.post("/api/schedule/randomize", json={}).status_code in (404, 405)
+    assert client.delete(f"/api/niches/{NICHE}/schedule").status_code in (404, 405)
 
 
-def test_randomize_splits_total_across_scheduled(client, tmp_path):
-    res = client.post(
-        "/api/schedule/randomize",
-        json={"window": ["08:00", "20:00"], "total_posts": 7, "min_gap_minutes": 30},
-    )
-    assert res.status_code == 200
-    lanes = res.json()["niches"]
-    # Single scheduled niche → it receives the whole total.
-    total = sum(lane["posts_per_day"][0] for lane in lanes)
-    assert total == 7
-    lane = next(n for n in lanes if n["slug"] == NICHE)
-    assert lane["windows"] == [["08:00", "20:00"]]
-    assert lane["posts_per_day"][0] == lane["posts_per_day"][1]  # exact share
-    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
-    assert on_disk["schedule"]["min_gap_minutes"] == 30
-    # bad time range rejected
-    assert client.post(
-        "/api/schedule/randomize",
-        json={"window": ["20:00", "08:00"], "total_posts": 3},
-    ).status_code == 422
+def test_voice_samples_default_save_and_reset(client):
+    acct = _account(client)
+    body = client.get(f"/api/voice?account={acct}").json()
+    assert body["default"] is True and len(body["samples"]) == 5
+    saved = client.put(f"/api/voice?account={acct}",
+                       json={"samples": ["  one  ", "", "two", "one"]}).json()
+    assert saved == {"samples": ["one", "two"], "default": False}
+    other = _account(client, "other")
+    assert client.get(f"/api/voice?account={other}").json()["default"] is True  # isolated
+    assert client.delete(f"/api/voice?account={acct}").json()["default"] is True
 
 
-def test_randomize_requires_scheduled_niche(client):
-    client.delete(f"/api/niches/{NICHE}/schedule")
-    res = client.post("/api/schedule/randomize", json={"window": ["09:00", "18:00"], "total_posts": 4})
-    assert res.status_code == 400
+def test_stories_endpoint_lists_the_shortlist(client):
+    from datetime import datetime, timezone
+
+    from opensocial.core.filtering import filter_niche
+    from opensocial.core.knowledge import ingest
+
+    acct = _account(client)
+    client.put(f"/api/niches/followed?account={acct}", json={"slugs": [NICHE]})
+    sf = client.app.state.session_factory
+    with sf() as s:
+        store_items(s, [ContentItem(
+            source_name="hackernews", source_category="tech", title="Open model ships",
+            url="https://a.com/1", published_at=datetime.now(timezone.utc),
+        )], NICHE)
+        filter_niche(s, NICHE, NICHE_CONFIG)
+        ingest(s)
+    body = client.get(f"/api/stories?account={acct}").json()
+    assert body["total_stories"] == 1
+    assert body["shortlist"][0]["title"] == "Open model ships"
+    assert "coverage" in body["shortlist"][0]["signals"]
+    assert body["used"] == []
 
 
 def test_niche_put_roundtrip(client, tmp_path):
@@ -710,3 +724,19 @@ def test_reset_clear_credentials_wipes_secrets(client, monkeypatch):
     assert not any(k["set"] for k in x["keys"])
     # nothing left to re-inject from the DB
     assert inject_stored_secrets(client.app.state.session_factory) == 0
+
+
+def test_story_ttl_setting(client):
+    assert client.get("/api/status").json()["story_ttl_hours"] == 24
+    assert client.patch("/api/settings", json={"story_ttl_hours": 12}).json()["story_ttl_hours"] == 12
+    assert client.patch("/api/settings", json={"story_ttl_hours": 0}).status_code == 422
+
+
+def test_schedule_reports_status_and_day_tagged_upcoming(client):
+    acct = _account(client)
+    client.put(f"/api/niches/followed?account={acct}", json={"slugs": [NICHE]})
+    body = client.get(f"/api/schedule?account={acct}").json()
+    assert body["status"]["state"] in {"starting", "ok"}
+    assert isinstance(body["now_minute"], int)
+    for u in body["upcoming"]:
+        assert set(u) == {"at", "day", "minute"} and u["day"] in (0, 1)

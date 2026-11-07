@@ -44,8 +44,8 @@ export let NICHES = [
 // on the Settings → Actions tab. [command type, label, description].
 export const QUICK_ACTIONS = [
   ['fetch_sources', 'Fetch sources', 'pull fresh items from every enabled source'],
-  ['generate_posts', 'Generate posts', 'draft posts from today\'s candidate items'],
-  ['run_slots', 'Run due now', 'dispatch every posting slot due at this moment'],
+  ['generate_posts', 'Write a draft', 'write one post from the best unused story'],
+  ['run_slots', 'Post next now', 'publish the next post right away (within caps)'],
 ];
 
 const LABELS = { tech: 'Technology', ai: 'AI' };
@@ -116,7 +116,7 @@ export const ROUTE_TITLES = {
   history: ['History', 'post_history & cost'],
   sources: ['Sources', 'static & dynamic ingestion'],
   rawdata: ['Raw Data', 'raw fetched content_items'],
-  schedule: ['Schedule', 'resolved posting slots'],
+  schedule: ['Schedule', 'posting window & rhythm'],
   logs: ['Logs', 'live service tail'],
   settings: ['Settings', 'safety & credentials'],
 };

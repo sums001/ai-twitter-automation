@@ -28,13 +28,6 @@
     "dup_threshold": 0.78,
     "dup_window_days": 2
   },
-  "prioritization": {
-    "recency_weight": 0.55,
-    "engagement_weight": 0.25,
-    "relevance_weight": 0.1,
-    "sentiment_weight": 0.1,
-    "half_life_hours": 12
-  },
   "sources": {
     "googlenews": {
       "query": "entertainment OR celebrity OR movie",
