@@ -16,12 +16,19 @@ from __future__ import annotations
 
 import calendar
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import feedparser
 import httpx
 
 from opensocial.core.models import ContentItem
-from opensocial.sources.base import DEFAULT_TIMEOUT, USER_AGENT, Source, register
+from opensocial.sources.base import (
+    DEFAULT_TIMEOUT,
+    USER_AGENT,
+    Setting,
+    Source,
+    register,
+)
 
 
 def struct_to_dt(struct_time) -> datetime | None:
@@ -101,6 +108,18 @@ async def fetch_feeds(
 class RSSSource(Source):
     name = "rss"
     category = "generic"
+    label = "RSS feeds"
+    description = "Newest entries from the RSS / Atom feeds you add (news sites, blogs)."
+    settings = (
+        Setting("feeds", "List of RSS / Atom feed URLs.", []),
+        Setting("category", "Category tag for fetched items.", "generic"),
+    )
+    origin_key = "feeds"
+    origin_label = "RSS / Atom feed URL"
+
+    @classmethod
+    def origin_display(cls, value: str) -> str:
+        return urlparse(value).netloc or value
 
     async def fetch(self) -> list[ContentItem]:
         feeds: list[str] = self.config.get("feeds", []) or []

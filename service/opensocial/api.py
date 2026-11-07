@@ -19,7 +19,6 @@ import random
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,138 +72,27 @@ from opensocial.sources import available_sources, get_source
 # ---------------------------------------------------------------------------
 # Source metadata for the dashboard
 # ---------------------------------------------------------------------------
-
-SOURCE_LABELS = {
-    "rss": "RSS",
-    "hackernews": "Hacker News",
-    "googlenews": "Google News",
-    "medium": "Medium",
-    "devto": "dev.to",
-    "github_releases": "GitHub Releases",
-    "arxiv": "arXiv",
-    "nasa": "NASA",
-    "yfinance": "yfinance",
-    "reddit": "Reddit",
-    "youtube": "YouTube",
-    "producthunt": "Product Hunt",
-    "guardian": "The Guardian",
-}
-
-# source -> (env var names, "required" | "optional")
-SOURCE_KEYS: dict[str, tuple[tuple[str, ...], str]] = {
-    "guardian": (("GUARDIAN_API_KEY",), "required"),
-    "youtube": (("YOUTUBE_API_KEY",), "required"),
-    "producthunt": (("PRODUCTHUNT_TOKEN",), "required"),
-    "github_releases": (("GITHUB_TOKEN",), "optional"),
-    "nasa": (("NASA_API_KEY",), "optional"),
-}
-
-# Sources shown in the dashboard but not yet usable: surfaced with an "upcoming"
-# badge and a locked enable toggle. Remove an entry here to make it usable.
-UPCOMING_SOURCES: frozenset[str] = frozenset({"youtube"})
-
-# Dynamic sources take a user-supplied origin URL (feed / subreddit / channel)
-# that maps into a niche's per-source config list. Everything else is "static":
-# a fixed origin that simply runs for whatever niches reference it. ``key`` is
-# the niche-config list the parsed origin is appended to; ``label`` drives the
-# dashboard's add-origin input; ``defaults`` seed a freshly-created source block.
-ORIGIN_SPEC: dict[str, dict] = {
-    "reddit": {
-        "key": "subreddits",
-        "label": "subreddit URL or name",
-        "defaults": {"sort": "hot", "limit": 25},
-        "max_origins": 10,
-    },
-    "youtube": {
-        "key": "channel_ids",
-        "label": "YouTube channel URL (/channel/UC…)",
-        "defaults": {"limit": 10, "transcripts": True},
-    },
-    "rss": {
-        "key": "feeds",
-        "label": "RSS / Atom feed URL",
-        "defaults": {},
-    },
-}
-DYNAMIC_SOURCES = set(ORIGIN_SPEC)
-
-# Per-source ceiling on user-added origins (subreddits / feeds / channels).
-# Sources may override via ``ORIGIN_SPEC[name]["max_origins"]``.
-MAX_ORIGINS = 20
+# Every source describes itself (label, auth, key envs, origin spec) on its
+# plugin class — see ``opensocial.sources.base.Source``. Nothing here repeats it.
 
 
-def _max_origins(name: str) -> int:
-    return ORIGIN_SPEC.get(name, {}).get("max_origins", MAX_ORIGINS)
-
-
-def _parse_reddit_origin(value: str) -> str | None:
-    """Extract a subreddit name from a URL, an ``r/name``, or a bare name."""
-    s = value.strip().rstrip("/")
-    m = re.search(r"reddit\.com/r/([A-Za-z0-9_]+)", s, re.I)
-    if m:
-        return m.group(1)
-    m = re.fullmatch(r"(?:r/)?([A-Za-z0-9_]+)", s)
-    return m.group(1) if m else None
-
-
-def _parse_youtube_origin(value: str) -> str | None:
-    """Extract a channel id (``UC…``) when present, else the handle/name as-is.
-
-    Note: ``@handle`` / ``/c/`` / ``/user/`` URLs aren't resolvable to a channel
-    id without the Data API, so they're stored verbatim — prefer ``/channel/UC…``
-    URLs for reliable fetching.
-    """
-    s = value.strip().rstrip("/")
-    m = re.search(r"/channel/(UC[\w-]+)", s)
-    if m:
-        return m.group(1)
-    m = re.search(r"(UC[\w-]{20,})", s)
-    if m:
-        return m.group(1)
-    m = re.search(r"/(@[\w.-]+)", s) or re.search(r"/(?:c|user)/([\w.-]+)", s)
-    if m:
-        return m.group(1)
-    return s or None
-
-
-def _parse_rss_origin(value: str) -> str | None:
-    """RSS origins are stored verbatim (the feed URL)."""
-    s = value.strip()
-    return s or None
-
-
-_ORIGIN_PARSERS = {
-    "reddit": _parse_reddit_origin,
-    "youtube": _parse_youtube_origin,
-    "rss": _parse_rss_origin,
-}
-
-
-def _parse_origin(name: str, value: str) -> str | None:
-    parser = _ORIGIN_PARSERS.get(name)
-    return parser(value) if parser else None
-
-
-def _origin_display(name: str, value: str) -> str:
-    """A human label for an origin (``r/bitcoin``, a netloc, the channel id)."""
-    if name == "reddit":
-        return f"r/{value}"
-    if name == "rss":
-        netloc = urlparse(value).netloc
-        return netloc or value
-    return value
+def _origin_source(name: str):
+    """The plugin class for ``name`` if it takes user-added origins, else None."""
+    cls = get_source(name)
+    return cls if cls.origin_key else None
 
 
 # Credential groups for the Settings → Credentials tab. X is special-cased
-# (stored as an encrypted platform account, not env secrets).
+# (stored as an encrypted platform account, not env secrets). Source keys are
+# derived from the registry, so adding a keyed source needs no change here.
 CREDENTIAL_GROUPS: list[tuple[str, tuple[str, ...]]] = [
     ("OpenAI", ("OPENAI_API_KEY",)),
     ("Anthropic", ("ANTHROPIC_API_KEY",)),
-    ("YouTube", ("YOUTUBE_API_KEY",)),
-    ("Product Hunt", ("PRODUCTHUNT_TOKEN",)),
-    ("The Guardian", ("GUARDIAN_API_KEY",)),
-    ("NASA", ("NASA_API_KEY",)),
-    ("GitHub", ("GITHUB_TOKEN",)),
+    *(
+        (get_source(n).label or n, get_source(n).key_envs)
+        for n in available_sources()
+        if get_source(n).key_envs
+    ),
     ("Unsplash", ("UNSPLASH_ACCESS_KEY",)),
 ]
 
@@ -1099,22 +987,25 @@ def create_app(
     @app.get("/api/sources")
     def sources():
         all_niches = niches()
+        names = available_sources()
         usage: dict[str, dict] = {}
-        origins: dict[str, list] = {name: [] for name in ORIGIN_SPEC}
+        origins: dict[str, list] = {name: [] for name in names}
         for n in all_niches:
             for name, scfg in n.sources.items():
+                if name not in origins:
+                    continue  # stale niche entry for a removed source
                 u = usage.setdefault(name, {"niches": [], "enabled_in": 0})
                 u["niches"].append(n.slug)
                 if scfg.get("enabled") is not False and n.enabled:
                     u["enabled_in"] += 1
-                spec = ORIGIN_SPEC.get(name)
-                if spec:
-                    for value in scfg.get(spec["key"]) or []:
+                cls = _origin_source(name)
+                if cls:
+                    for value in scfg.get(cls.origin_key) or []:
                         origins[name].append(
                             {
                                 "niche": n.slug,
                                 "value": value,
-                                "display": _origin_display(name, value),
+                                "display": cls.origin_display(value),
                             }
                         )
 
@@ -1122,33 +1013,29 @@ def create_app(
             statuses = source_statuses(s)
 
         out = []
-        for name in available_sources():
+        for name in names:
+            cls = get_source(name)
             row = statuses.get(name)
-            envs, requirement = SOURCE_KEYS.get(name, ((), None))
-            key_set = all(os.environ.get(e) for e in envs) if envs else None
             u = usage.get(name, {"niches": [], "enabled_in": 0})
-            kind = "dynamic" if name in DYNAMIC_SOURCES else "static"
+            has_origins = bool(cls.origin_key)
+            key_set = cls.key_available() if cls.key_envs else None
             out.append(
                 {
-                    "id": name,
-                    "name": SOURCE_LABELS.get(name, name),
-                    "kind": kind,
-                    "upcoming": name in UPCOMING_SOURCES,
-                    "category": getattr(get_source(name), "category", None),
+                    **cls.describe(),
+                    "kind": "dynamic" if has_origins else "static",
                     "enabled": row.enabled_globally if row is not None else False,
                     "last_fetch_at": _iso(row.last_fetch_at) if row is not None else None,
                     "last_status": row.last_fetch_status if row is not None else None,
                     "ok": (row.last_fetch_status or "ok").startswith("ok")
                     if row is not None
                     else True,
-                    "key": requirement,
-                    "key_envs": list(envs),
+                    # back-compat: "required" | "optional" | None
+                    "key": None if cls.auth == "none" else cls.auth,
                     "key_set": key_set,
+                    "needs_key": cls.missing_required_key(),
                     "niches": u["niches"],
                     "enabled_in": u["enabled_in"],
-                    "origin_label": ORIGIN_SPEC[name]["label"] if kind == "dynamic" else None,
-                    "origins": origins.get(name, []) if kind == "dynamic" else [],
-                    "max_origins": _max_origins(name) if kind == "dynamic" else None,
+                    "origins": origins[name] if has_origins else [],
                 }
             )
         return out
@@ -1157,103 +1044,104 @@ def create_app(
     def patch_source(name: str, patch: SourcePatch):
         if name not in available_sources():
             raise HTTPException(404, f"unknown source {name!r}")
-        if patch.enabled and name in UPCOMING_SOURCES:
+        if patch.enabled and get_source(name).upcoming:
             raise HTTPException(409, f"{name!r} is upcoming and can't be enabled yet")
         with session_factory() as s:
             row = upsert_source_status(s, name, enabled=patch.enabled)
             return {"id": name, "enabled": row.enabled_globally}
 
-    def _origin_add(niche_slug: str, name: str, spec: dict, value: str) -> None:
+    def _origin_add(niche_slug: str, cls, value: str) -> None:
         """Append a parsed origin to a niche's source block (seeding it if new)."""
         data, path = niche_or_404(niche_slug)
         sources = data.setdefault("sources", {})
-        block = sources.get(name)
+        block = sources.get(cls.name)
         if not isinstance(block, dict):
-            block = dict(spec["defaults"])
-            if name == "rss":
+            block = dict(cls.origin_defaults)
+            if any(st.name == "category" for st in cls.settings):
                 block.setdefault("category", niche_slug)
-            sources[name] = block
-        lst = block.setdefault(spec["key"], [])
+            sources[cls.name] = block
+        lst = block.setdefault(cls.origin_key, [])
         if value not in lst:
             lst.append(value)
         write_niche(path, data)
 
-    def _origin_remove(niche_slug: str, name: str, spec: dict, value: str) -> None:
+    def _origin_remove(niche_slug: str, cls, value: str) -> None:
         """Remove an origin from a niche, dropping the block once it's empty."""
         data, path = niche_or_404(niche_slug)
-        block = (data.get("sources") or {}).get(name)
+        block = (data.get("sources") or {}).get(cls.name)
         if not isinstance(block, dict):
             return
-        lst = block.get(spec["key"]) or []
+        lst = block.get(cls.origin_key) or []
         if value in lst:
             lst.remove(value)
         if lst:
-            block[spec["key"]] = lst
+            block[cls.origin_key] = lst
         else:
-            data["sources"].pop(name, None)
+            data["sources"].pop(cls.name, None)
         write_niche(path, data)
 
-    def _origin_spec_or_404(name: str) -> dict:
-        spec = ORIGIN_SPEC.get(name)
-        if spec is None:
-            raise HTTPException(404, f"{name!r} is not a dynamic source")
-        return spec
+    def _origin_source_or_404(name: str):
+        if name not in available_sources():
+            raise HTTPException(404, f"unknown source {name!r}")
+        cls = _origin_source(name)
+        if cls is None:
+            raise HTTPException(404, f"{name!r} doesn't take user-added origins")
+        return cls
 
-    def _parse_origin_or_422(name: str, url: str | None) -> str:
+    def _parse_origin_or_422(cls, url: str | None) -> str:
         if not url or not url.strip():
             raise HTTPException(422, "url is required")
-        value = _parse_origin(name, url)
+        value = cls.parse_origin(url)
         if not value:
-            raise HTTPException(422, f"could not parse a {name} origin from {url!r}")
+            raise HTTPException(422, f"could not parse a {cls.name} origin from {url!r}")
         return value
 
-    def _origin_count(name: str, spec: dict) -> int:
-        """Total origins saved for a dynamic source across all niches."""
+    def _origin_count(cls) -> int:
+        """Total origins saved for a source across all niches."""
         return sum(
-            len(scfg.get(spec["key"]) or [])
+            len(scfg.get(cls.origin_key) or [])
             for n in niches()
             for sname, scfg in n.sources.items()
-            if sname == name
+            if sname == cls.name
         )
 
     @app.post("/api/sources/{name}/origins")
     def add_origin(name: str, body: OriginIn):
-        spec = _origin_spec_or_404(name)
-        value = _parse_origin_or_422(name, body.url)
-        cap = _max_origins(name)
-        if _origin_count(name, spec) >= cap:
-            raise HTTPException(422, f"{name} is capped at {cap} origins")
-        _origin_add(body.niche, name, spec, value)
+        cls = _origin_source_or_404(name)
+        value = _parse_origin_or_422(cls, body.url)
+        if _origin_count(cls) >= cls.max_origins:
+            raise HTTPException(422, f"{name} is capped at {cls.max_origins} origins")
+        _origin_add(body.niche, cls, value)
         return {
             "name": name,
             "niche": body.niche,
             "value": value,
-            "display": _origin_display(name, value),
+            "display": cls.origin_display(value),
         }
 
     @app.put("/api/sources/{name}/origins")
     def update_origin(name: str, body: OriginEditIn):
         """Edit a saved origin: re-parse the new url and (optionally) move niches."""
-        spec = _origin_spec_or_404(name)
+        cls = _origin_source_or_404(name)
         if not body.value:
             raise HTTPException(422, "value (the origin being edited) is required")
-        new_value = _parse_origin_or_422(name, body.url)
+        new_value = _parse_origin_or_422(cls, body.url)
         target = body.new_niche or body.niche
-        _origin_remove(body.niche, name, spec, body.value)
-        _origin_add(target, name, spec, new_value)
+        _origin_remove(body.niche, cls, body.value)
+        _origin_add(target, cls, new_value)
         return {
             "name": name,
             "niche": target,
             "value": new_value,
-            "display": _origin_display(name, new_value),
+            "display": cls.origin_display(new_value),
         }
 
     @app.delete("/api/sources/{name}/origins")
     def remove_origin(name: str, body: OriginIn):
-        spec = _origin_spec_or_404(name)
+        cls = _origin_source_or_404(name)
         if not body.value:
             raise HTTPException(422, "value is required")
-        _origin_remove(body.niche, name, spec, body.value)
+        _origin_remove(body.niche, cls, body.value)
         return {"name": name, "niche": body.niche, "removed": body.value}
 
     # ---- per-workspace AI config (text); source/AI keys stay global ---------

@@ -13,7 +13,7 @@ import NicheEditor from '../components/NicheEditor';
 // /api/niches/followed; the open niche (settingsNiche) renders its config
 // editor right under its row, exactly like the Sources tab.
 export default function Niches() {
-  const { settingsNiche, setSettingsNiche, setNicheTab, withWorkspace } = useApp();
+  const { settingsNiche, setSettingsNiche, withWorkspace } = useApp();
   const { data: allNiches } = usePoll('/api/niches', 60000);
   const { data: followedData, reload } = usePoll(withWorkspace('/api/niches/followed'), 0);
   // Niches are a shared catalog — every workspace sees all of them. Selection
@@ -58,12 +58,7 @@ export default function Niches() {
 
   // Expand/collapse a niche's inline config editor.
   const toggleEditor = (slug) => {
-    if (settingsNiche === slug) {
-      setSettingsNiche(null);
-    } else {
-      setSettingsNiche(slug);
-      setNicheTab('general');
-    }
+    setSettingsNiche(settingsNiche === slug ? null : slug);
   };
 
   const list = niches || [];

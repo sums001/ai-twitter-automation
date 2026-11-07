@@ -12,7 +12,13 @@ from datetime import datetime, timezone
 import httpx
 
 from opensocial.core.models import ContentItem
-from opensocial.sources.base import DEFAULT_TIMEOUT, USER_AGENT, Source, register
+from opensocial.sources.base import (
+    DEFAULT_TIMEOUT,
+    USER_AGENT,
+    Setting,
+    Source,
+    register,
+)
 
 SEARCH_URL = "https://hn.algolia.com/api/v1/search_by_date"
 
@@ -21,6 +27,12 @@ SEARCH_URL = "https://hn.algolia.com/api/v1/search_by_date"
 class HackerNewsSource(Source):
     name = "hackernews"
     category = "tech"
+    label = "Hacker News"
+    description = "Newest Hacker News stories matching a query, via the Algolia HN API."
+    settings = (
+        Setting("query", "Search terms; empty returns the latest stories.", ""),
+        Setting("limit", "Max items per fetch.", 30),
+    )
 
     async def fetch(self) -> list[ContentItem]:
         query: str = self.config.get("query", "")

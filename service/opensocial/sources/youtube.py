@@ -15,13 +15,60 @@ from __future__ import annotations
 import asyncio
 
 from opensocial.core.models import ContentItem
-from opensocial.sources.base import Source, parse_iso8601, register, resolve_api_key
+import re
+
+from opensocial.sources.base import (
+    AUTH_REQUIRED,
+    Setting,
+    Source,
+    parse_iso8601,
+    register,
+    resolve_api_key,
+)
 
 
 @register
 class YouTubeSource(Source):
     name = "youtube"
     category = "video"
+    label = "YouTube"
+    description = "Newest videos per channel or search, with their transcripts."
+    auth = AUTH_REQUIRED
+    key_envs = ("YOUTUBE_API_KEY",)
+    key_help = (
+        "A YouTube Data API v3 key from Google Cloud Console. The free quota is "
+        "10,000 units/day and each search costs 100, so about 100 searches a day."
+    )
+    settings = (
+        Setting("channel_ids", "Channel ids (UC…) to follow.", []),
+        Setting("query", "Search terms (alone or within the channels).", ""),
+        Setting("limit", "Max videos per channel / search.", 10),
+        Setting("transcripts", "Fetch each video's transcript as its body.", True),
+    )
+    upcoming = True
+    origin_key = "channel_ids"
+    origin_label = "YouTube channel URL (/channel/UC…)"
+    origin_defaults = (("limit", 10), ("transcripts", True))
+
+    @classmethod
+    def parse_origin(cls, value: str) -> str | None:
+        """Extract a channel id (``UC…``) when present, else the handle as-is.
+
+        ``@handle`` / ``/c/`` / ``/user/`` URLs can't be resolved to a channel id
+        without the Data API, so they're stored verbatim; prefer
+        ``/channel/UC…`` URLs for reliable fetching.
+        """
+        s = value.strip().rstrip("/")
+        m = re.search(r"/channel/(UC[\w-]+)", s)
+        if m:
+            return m.group(1)
+        m = re.search(r"(UC[\w-]{20,})", s)
+        if m:
+            return m.group(1)
+        m = re.search(r"/(@[\w.-]+)", s) or re.search(r"/(?:c|user)/([\w.-]+)", s)
+        if m:
+            return m.group(1)
+        return s or None
 
     async def fetch(self) -> list[ContentItem]:
         key = resolve_api_key(self.config, "YOUTUBE_API_KEY", source_name=self.name)

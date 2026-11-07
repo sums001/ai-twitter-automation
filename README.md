@@ -51,16 +51,15 @@ Each topic pulls from a mix of trusted places on the web. Across all topics, Ope
 * **Reddit**, for popular community posts
 * **YouTube**, for videos and their transcripts
 * **Hacker News**, for technology and startup discussion
-* **Medium** and other **blogs and news sites** (such as TechCrunch, Ars Technica, Reuters, MarketWatch, CoinDesk, Decrypt, The Block, Harvard Business Review, Indie Hackers, the Y Combinator blog, Nature, PhysOrg, Futurism, and the World Health Organization)
+* **Medium** and other **blogs and news sites** (TechCrunch, Ars Technica, Futurism, CoinDesk, Decrypt, The Block, MarketWatch, CNBC, Harvard Business Review, Fast Company, Fortune, Entrepreneur, the Y Combinator blog, Nature, Phys.org, ScienceDaily, and the World Health Organization)
 * **Dev.to**, for developer articles
-* **GitHub**, for new software releases
 * **arXiv**, for research papers
-* **Product Hunt**, for new products
-* **NASA**, for space pictures and news
 * **The Guardian**, for world news
 * **Yahoo Finance**, for market and stock news
 
-Most of these work right away with no setup. A few need a free key, which is explained below.
+You can add any other news site or blog that has an RSS feed on the **Sources** page.
+
+Almost all of these work right away with no setup. YouTube and The Guardian need a free key, which is explained below. The **Sources** page groups sources into "No key needed" and "Needs a key".
 
 ## What you need before you start
 
@@ -135,7 +134,7 @@ You may want these keys:
 
 * **An AI key**, only if you chose a paid AI like Claude, ChatGPT, or Gemini. You add it on the **Settings** page.
 * **An image key (Unsplash)**, only if you want stock photos attached to posts. You add it on the **Settings** page, alongside your AI keys. Without it, topics set to use Unsplash photos simply post without an image.
-* **Source keys**, only for the few sources that need one. These are YouTube, Product Hunt, and The Guardian. Everything else works without a key.
+* **Source keys**, only for the few sources that need one. These are YouTube and The Guardian. Everything else works without a key.
 * **Your X account keys**, when you are ready to post for real (see below).
 
 Your AI key, image key, and X account keys belong to the workspace you are in, so different workspaces can use different keys. To add a source key, open the **Sources** page, find the source, paste its key, turn the source on, and save (source keys are shared across all workspaces).

@@ -13,7 +13,13 @@ import feedparser
 import httpx
 
 from opensocial.core.models import ContentItem
-from opensocial.sources.base import DEFAULT_TIMEOUT, USER_AGENT, Source, register
+from opensocial.sources.base import (
+    DEFAULT_TIMEOUT,
+    USER_AGENT,
+    Setting,
+    Source,
+    register,
+)
 from opensocial.sources.rss import struct_to_dt
 
 API_URL = "https://export.arxiv.org/api/query"
@@ -23,6 +29,12 @@ API_URL = "https://export.arxiv.org/api/query"
 class ArxivSource(Source):
     name = "arxiv"
     category = "science"
+    label = "arXiv"
+    description = "Newest arXiv research papers for a search query (title and abstract)."
+    settings = (
+        Setting("query", "arXiv search, e.g. cat:cs.AI OR cat:cs.LG.", "all:artificial intelligence"),
+        Setting("limit", "Max items per fetch.", 30),
+    )
 
     async def fetch(self) -> list[ContentItem]:
         query: str = self.config.get("query") or self.config.get(
