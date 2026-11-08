@@ -4,7 +4,7 @@ import { usePoll } from '../api';
 import { useApp } from '../AppContext';
 import { LEVEL_COLORS } from '../data';
 import { hms } from '../utils';
-import { PulseDot, EmptyState } from '../components/common';
+import { PulseDot, EmptyState, Segmented, fieldStyle } from '../components/common';
 
 const MSG_COLOR = { error: '#f0a8b0', warn: '#e7c98a', info: '#aeb6c0' };
 
@@ -26,29 +26,13 @@ export default function Logs() {
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {['all', 'info', 'warn', 'error'].map((k) => {
-            const active = level === k;
-            return (
-              <button
-                key={k}
-                onClick={() => setLevel(k)}
-                className="os-mono"
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                  border: `1px solid ${active ? '#2f3947' : '#1c212a'}`, cursor: 'pointer',
-                  fontSize: 11, fontWeight: 600, padding: '5px 11px', borderRadius: 7,
-                  background: active ? '#1a212b' : 'transparent', color: active ? '#e7eaef' : '#7a828f',
-                }}
-              >
-                {k}
-                <span style={{ fontSize: 9, color: '#5b6470' }}>{counts[k] || 0}</span>
-              </button>
-            );
-          })}
-        </div>
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, background: '#10141a', border: '1px solid #1f242d', borderRadius: 8, padding: '2px 11px', minWidth: 200 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+        <Segmented
+          options={[['all', 'All'], ['info', 'Info'], ['warn', 'Warnings'], ['error', 'Errors']].map(([k, l]) => [k, l, counts[k] || 0])}
+          value={level}
+          onChange={setLevel}
+        />
+        <div style={{ ...fieldStyle, marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, padding: '2px 11px', minWidth: 200 }}>
           <span style={{ display: 'inline-flex', color: '#5b6470' }}><Search size={13} /></span>
           <input
             value={search}
@@ -60,7 +44,7 @@ export default function Logs() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
           <PulseDot duration="1.6s" />
-          <span className="os-mono" style={{ fontSize: 10, color: '#6b7280' }}>tailing · 3s</span>
+          <span className="os-mono" style={{ fontSize: 10, color: '#6b7280' }}>live</span>
         </div>
       </div>
 

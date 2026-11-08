@@ -36,7 +36,7 @@ export default function Sidebar() {
               className="os-mono"
               style={{
                 fontSize: 8.5, fontWeight: 700, letterSpacing: '.6px', color: '#4b5563',
-                padding: gi ? '14px 13px 6px' : '4px 13px 6px',
+                padding: gi ? '14px 13px 6px' : '4px 13px 6px', textTransform: 'uppercase',
               }}
             >
               {group}

@@ -4,16 +4,15 @@ Each worker tick (every few seconds) does, for every workspace:
 
 1. If its next post is due within ``FETCH_LEAD`` minutes, one **shared** fetch
    runs for all workspaces (throttled), so the post is written on fresh data.
-2. When the post comes due (``ws:<id>:next_post_at``):
+2. When a posting mark arrives (``ws:<id>:next_post_at``):
 
-   * **auto mode**: publish a fresh pending draft if one exists (0 tokens),
-     otherwise write one from the knowledge base and publish it. The daily cap
-     and minimum gap still apply.
-   * **manual mode**: write one draft into the review queue, but only while
-     fewer than ``max_pending_drafts`` are waiting, so an ignored queue costs
-     nothing.
+   * **always** write one new draft from the best unused story;
+   * **auto mode** then publishes the best fresh draft: the highest-priority
+     draft written in the last ``FRESH_DRAFT_HOURS`` (often the one just
+     written). The daily cap and minimum gap still apply;
+   * **manual mode** stops there: the draft waits in the Queue for review.
 
-3. Roll the next post time: one jittered gap later, inside the window.
+3. Roll the next post time: the next slot in the window.
 
 The fetch → filter → knowledge-base ingest pipeline lives in
 ``core/commands._do_fetch``; drafting in ``core/generate.draft_next``.
@@ -36,7 +35,6 @@ from opensocial.core.db import (
     last_published_for_account,
     list_platform_accounts,
     log,
-    pending_draft_count,
     published_today_count,
     set_app_setting,
 )
@@ -120,13 +118,17 @@ def ai_config_with_key(session: Session, workspace_id: str | None) -> dict:
     else a legacy global default) so generation authenticates with the right
     one without relying on a single shared ``os.environ`` value.
     """
-    from opensocial.ai.text import PROVIDER_KEY_ENV
+    import os
+
+    from opensocial.ai.text import PROVIDER_KEY_ENV, canonical_provider
 
     ai_cfg = load_ai_config(session, workspace_id)
-    provider = ((ai_cfg.get("text") or {}).get("provider") or "").lower()
+    provider = canonical_provider((ai_cfg.get("text") or {}).get("provider"))
     env = PROVIDER_KEY_ENV.get(provider)
     if env:
-        key = get_scoped_secret(session, workspace_id, env)
+        # The workspace's own key, else the env var (LiteLLM would read the
+        # hosted providers' vars itself, but not LOCAL_LLM_API_KEY).
+        key = get_scoped_secret(session, workspace_id, env) or os.environ.get(env)
         if key:
             ai_cfg = {**ai_cfg, "text": {**ai_cfg["text"], "api_key": key}}
     return ai_cfg
@@ -252,24 +254,28 @@ def post_next(
     return TickOutcome(wid, "posted", post.text[:80], post_id=post.id, dry_run=outcome.dry_run)
 
 
-def _draft_only(session: Session, ctx: WorkspaceContext, now: datetime, **kwargs) -> TickOutcome:
+def on_mark(
+    session: Session,
+    ctx: WorkspaceContext,
+    *,
+    now: datetime,
+    publisher: Publisher | None = None,
+    **draft_kwargs,
+) -> TickOutcome:
+    """A posting mark arrived: write one draft, then (auto mode) publish the best."""
     wid = ctx.workspace_id
-    waiting = pending_draft_count(session, wid)
-    if waiting >= ctx.cadence.max_pending_drafts:
-        return TickOutcome(wid, "skipped", f"{waiting} drafts already waiting for review")
-    drafted = draft_for_workspace(session, ctx, now=now, **kwargs)
-    if drafted is None:
-        return TickOutcome(wid, "skipped", "knowledge base is empty for the followed niches")
-    return TickOutcome(wid, "drafted", drafted.text[:80], post_id=drafted.post_id)
+    drafted = draft_for_workspace(session, ctx, now=now, **draft_kwargs)
+    if ctx.settings.app_mode != "auto":
+        if drafted is None:
+            return TickOutcome(wid, "skipped", "knowledge base is empty for the followed niches")
+        return TickOutcome(wid, "drafted", drafted.text[:80], post_id=drafted.post_id)
+    # Auto: publish the highest-priority fresh draft (post_next picks it).
+    return post_next(session, ctx, now=now, publisher=publisher, **draft_kwargs)
 
 
 def wants_work(session: Session, ctx: WorkspaceContext) -> bool:
-    """Whether this workspace's next due tick would draft or post anything."""
-    if not ctx.niches:
-        return False
-    if ctx.settings.app_mode == "auto":
-        return True
-    return pending_draft_count(session, ctx.workspace_id) < ctx.cadence.max_pending_drafts
+    """Whether this workspace's next mark does anything (it always drafts)."""
+    return bool(ctx.niches)
 
 
 def schedule_status(
@@ -277,8 +283,7 @@ def schedule_status(
 ) -> tuple[str, str]:
     """Whether the next scheduled post will actually happen, and if not, why.
 
-    Returns ``(state, message)``; ``state`` is ``ok``, ``idle``, ``paused``
-    (manual mode, review queue full), ``capped``, ``held`` (live mode, no X
+    Returns ``(state, message)``; ``state`` is ``ok``, ``idle``, ``capped``, ``held`` (live mode, no X
     credentials), ``starting`` (no time rolled yet) or ``overdue`` (the time
     passed but no worker picked it up).
     """
@@ -286,23 +291,21 @@ def schedule_status(
     if not ctx.niches:
         return "idle", "Follow at least one niche on the Niches page to start posting."
     auto = ctx.settings.app_mode == "auto"
-    if not auto:
-        waiting = pending_draft_count(session, wid)
-        if waiting >= ctx.cadence.max_pending_drafts:
-            return "paused", (
-                f"Drafting is paused: {waiting} drafts are waiting for review (limit "
-                f"{ctx.cadence.max_pending_drafts}). Approve or reject one in the Queue and "
-                "it picks up again at the next scheduled time."
-            )
     cap = _daily_cap(ctx)
     if auto and cap is not None and published_today_count(
         session, platform_account_id=wid, day=now
     ) >= cap:
-        return "capped", f"Daily cap of {cap} posts reached. Posting resumes tomorrow."
+        return "capped", (
+            f"Daily cap of {cap} posts reached. Drafts are still written; "
+            "publishing resumes tomorrow."
+        )
     if auto and not ctx.settings.dry_run and not load_credentials_for_account(
         session, ctx.settings, wid
     ):
-        return "held", "Live mode, but this account has no X credentials saved. Posts are held."
+        return "held", (
+            "Live mode, but this account has no X credentials saved. "
+            "Drafts are written but not published."
+        )
     if next_at is None:
         return "starting", "The worker picks the next time on its next tick (is `serve` running?)."
     if now - next_at > timedelta(minutes=3):
@@ -343,10 +346,7 @@ def tick_workspace(
         return TickOutcome(wid, "waiting", next_post_at=next_at)
 
     try:
-        if ctx.settings.app_mode == "auto":
-            outcome = post_next(session, ctx, now=now, publisher=publisher, **draft_kwargs)
-        else:
-            outcome = _draft_only(session, ctx, now, **draft_kwargs)
+        outcome = on_mark(session, ctx, now=now, publisher=publisher, **draft_kwargs)
     except Exception as exc:  # a model/network failure must not stall the loop
         session.rollback()
         outcome = TickOutcome(

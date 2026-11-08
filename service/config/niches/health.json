@@ -40,12 +40,6 @@
         "health",
         "mental-health"
       ]
-    },
-    "rss": {
-      "category": "health",
-      "feeds": [
-        "https://www.who.int/rss-feeds/news-english.xml"
-      ]
     }
   }
 }

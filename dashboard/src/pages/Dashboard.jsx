@@ -4,7 +4,7 @@ import { useApp } from '../AppContext';
 import { NICHE_COLOR, nicheLabel, LEVEL_COLORS } from '../data';
 import { usePoll } from '../api';
 import { fmtTime, relTime, hms } from '../utils';
-import { Card, NicheTag } from '../components/common';
+import { Button, Card, CardHeader, NicheTag } from '../components/common';
 
 // Chart colors — validated (dataviz validate_palette.js, dark, surface #111419):
 // lightness band, chroma, CVD and normal-vision separation all pass.
@@ -43,20 +43,20 @@ function colPath(x, y, w, base) {
   return `M${x},${base}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${base}Z`;
 }
 
-function useWidth() {
+function useBoxSize() {
   const ref = useRef(null);
-  const [w, setW] = useState(0);
+  const [size, setSize] = useState([0, 0]);
   useEffect(() => {
     if (!ref.current) return undefined;
-    const ro = new ResizeObserver(([e]) => setW(Math.floor(e.contentRect.width)));
+    const r = ref.current.getBoundingClientRect();
+    setSize([Math.floor(r.width), Math.floor(r.height)]); // first paint, before any resize
+    const ro = new ResizeObserver(([e]) => setSize([Math.floor(e.contentRect.width), Math.floor(e.contentRect.height)]));
     ro.observe(ref.current);
     return () => ro.disconnect();
   }, []);
-  return [ref, w];
+  return [ref, size[0], size[1]];
 }
 
-const cardTitle = { fontWeight: 600, fontSize: 13 };
-const cardSub = { fontSize: 10, color: INK_MUTED };
 
 // 14-point trend in a de-emphasis gray, today in the accent.
 function Sparkline({ values, accent }) {
@@ -129,10 +129,10 @@ function Legend({ items }) {
 
 // Grouped columns: items fetched vs new stories per day (one axis, both counts).
 function DailyChart({ dash }) {
-  const [ref, width] = useWidth();
+  const [ref, width, boxH] = useBoxSize();
   const [hover, setHover] = useState(null);
   const daily = (dash && dash.daily) || [];
-  const H = 190, ml = 34, mr = 6, mt = 8, mb = 22;
+  const H = Math.max(190, boxH), ml = 34, mr = 6, mt = 8, mb = 22;
   const plotW = Math.max(0, width - ml - mr);
   const plotH = H - mt - mb;
   const max = niceMax(Math.max(0, ...daily.map((d) => Math.max(d.items, d.stories))));
@@ -144,17 +144,15 @@ function DailyChart({ dash }) {
   const total = daily.reduce((s, d) => s + d.items, 0);
 
   return (
-    <Card style={{ padding: '16px 18px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
-        <div style={cardTitle}>Ingestion</div>
-        <span className="os-mono" style={cardSub}>last {daily.length || 14} days · {fmtNum(total)} items</span>
-        <div style={{ marginLeft: 'auto' }}>
-          <Legend items={[['Items fetched', C_ITEMS], ['New stories', C_STORIES]]} />
-        </div>
-      </div>
-      <div ref={ref} style={{ position: 'relative' }}>
+    <Card style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column' }}>
+      <CardHeader
+        title="Ingestion"
+        sub={`last ${daily.length || 14} days · ${fmtNum(total)} items`}
+        right={<Legend items={[['Items fetched', C_ITEMS], ['New stories', C_STORIES]]} />}
+      />
+      <div ref={ref} style={{ position: 'relative', flex: 1, minHeight: 190 }}>
         {width > 0 && (
-          <svg width={width} height={H} role="img" aria-label="Items fetched and new stories per day" onMouseLeave={() => setHover(null)}>
+          <svg width={width} height={H} style={{ position: 'absolute', inset: 0 }} role="img" aria-label="Items fetched and new stories per day" onMouseLeave={() => setHover(null)}>
             {[0, max / 2, max].map((v) => (
               <g key={v}>
                 <line x1={ml} x2={width - mr} y1={y(v)} y2={y(v)} stroke={GRID} strokeWidth="1" />
@@ -210,10 +208,7 @@ function TopStories({ dash }) {
   const rows = (dash && dash.top_stories) || [];
   return (
     <Card style={{ padding: '16px 18px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-        <div style={cardTitle}>Top stories</div>
-        <span className="os-mono" style={cardSub}>best unused · what gets posted next</span>
-      </div>
+      <CardHeader title="Top stories" sub="best unused · what gets posted next" style={{ marginBottom: 8 }} />
       {rows.map((s, i) => (
         <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 0', borderTop: i ? '1px solid #161b22' : 'none' }}>
           <span className="os-mono" style={{ width: 16, fontSize: 11, color: INK_MUTED, textAlign: 'right', flexShrink: 0 }}>{i + 1}</span>
@@ -249,10 +244,7 @@ function PostPipeline({ dash }) {
   const total = parts.reduce((s, p) => s + p.v, 0);
   return (
     <Card style={{ padding: '16px 18px' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 12 }}>
-        <div style={cardTitle}>Posts</div>
-        <span className="os-mono" style={cardSub}>{total} total · this workspace</span>
-      </div>
+      <CardHeader title="Posts" sub={`${total} total · this workspace`} />
       <div role="img" aria-label={parts.map((p) => `${p.label} ${p.v}`).join(', ')} style={{ display: 'flex', gap: 2, height: 8, borderRadius: 4, overflow: 'hidden', background: total ? 'transparent' : '#1c222b' }}>
         {parts.filter((p) => p.v > 0).map((p) => (
           <div key={p.k} title={`${p.label}: ${p.v} (${Math.round((p.v / total) * 100)}%)`} style={{ flex: p.v, background: p.color }} />
@@ -277,10 +269,7 @@ function SourceMix({ dash }) {
   const max = Math.max(1, ...rows.map((r) => r.items));
   return (
     <Card style={{ padding: '16px 18px' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 12 }}>
-        <div style={cardTitle}>Items by source</div>
-        <span className="os-mono" style={cardSub}>last 7 days</span>
-      </div>
+      <CardHeader title="Items by source" sub="last 7 days" />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
         {rows.map((r) => (
           <div key={r.name} style={{ display: 'grid', gridTemplateColumns: '82px 1fr 34px', alignItems: 'center', gap: 10 }} title={`${r.name}: ${r.items} items`}>
@@ -306,10 +295,7 @@ function NicheBreakdown({ dash }) {
   const head = { fontSize: 9, color: INK_MUTED, letterSpacing: '.4px', textAlign: 'right' };
   return (
     <Card style={{ padding: '16px 18px' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 12 }}>
-        <div style={cardTitle}>Niches</div>
-        <span className="os-mono" style={cardSub}>last 7 days · click to configure</span>
-      </div>
+      <CardHeader title="Niches" sub="last 7 days · click to configure" />
       <div style={{ ...grid, paddingBottom: 8, borderBottom: `1px solid ${GRID}` }}>
         <span className="os-mono" style={{ ...head, textAlign: 'left' }}>NICHE</span>
         <span className="os-mono" style={{ ...head, textAlign: 'left' }}>STORIES</span>
@@ -339,45 +325,55 @@ function NicheBreakdown({ dash }) {
   );
 }
 
-// the account's next post + projected times for the rest of today (server-rolled)
+// The account's next post, then the projected marks after it (server-rolled).
 function NextPosts({ sched }) {
   const nowMin = sched ? sched.now_minute : 0;
-  const times = sched ? sched.upcoming.slice(0, 12) : [];
+  const times = sched ? sched.upcoming.slice(0, 6) : [];
   const mode = sched ? sched.mode : null;
   const every = sched ? sched.cadence.every_minutes : null;
   const idle = sched && sched.followed_niches.length === 0;
   const status = (sched && sched.status) || { state: 'ok', message: '' };
-  const blocked = ['paused', 'capped', 'held'].includes(status.state);
+  const blocked = ['capped', 'held'].includes(status.state); // drafts still get written; publishing waits
+  const [first, ...rest] = times;
+  const rel = (u) => relTime(Math.round(u.day * 1440 + u.minute - nowMin));
 
   return (
     <Card style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 13 }}>
-        <div style={{ fontWeight: 600, fontSize: 13 }}>Next posts</div>
-        {every && (
-          <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>
-            every ~{every}m · {mode === 'auto' ? 'auto-publish' : 'drafts for review'}
-          </span>
-        )}
-      </div>
+      <CardHeader
+        title="Next posts"
+        sub={every ? `every ~${every}m · ${mode === 'auto' ? 'auto-publish' : 'drafts for review'}` : null}
+      />
       {blocked && status.message && (
         <div style={{ fontSize: 11, lineHeight: 1.5, color: '#f5a524', marginBottom: 10 }}>{status.message}</div>
       )}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 9, maxHeight: 300, overflowY: 'auto', opacity: blocked ? 0.55 : 1 }}>
-        {times.map((u, i) => (
-          <div key={u.at} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, background: i === 0 ? '#3ecf8e' : 'transparent', boxShadow: i === 0 ? 'none' : 'inset 0 0 0 1.5px #3a424d' }} />
-            <span style={{ fontSize: 12, color: i === 0 ? '#e7eaef' : '#9aa3af' }}>{i === 0 ? (mode === 'auto' ? 'Next post' : 'Next draft') : 'Approx.'}</span>
-            {u.day > 0 && <span className="os-mono" style={{ fontSize: 9.5, color: '#5b6470' }}>tomorrow</span>}
-            <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 600, color: '#e7eaef', flexShrink: 0 }}>{fmtTime(u.minute)}</span>
-            <span className="os-mono" style={{ fontSize: 10, color: '#5b6470', width: 58, textAlign: 'right', flexShrink: 0 }}>{relTime(Math.round(u.day * 1440 + u.minute - nowMin))}</span>
+      {first && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 9, background: 'rgba(62,207,142,.07)', border: '1px solid rgba(62,207,142,.2)', marginBottom: 8 }}>
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#3ecf8e', flexShrink: 0 }} />
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: '#e7eaef' }}>{mode === 'auto' ? 'Next post' : 'Next draft'}</span>
+          {first.day > 0 && <span className="os-mono" style={{ fontSize: 9.5, color: '#5b6470' }}>tomorrow</span>}
+          <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 15, fontWeight: 700, color: '#e7eaef' }}>{fmtTime(first.minute)}</span>
+          <span className="os-mono" style={{ fontSize: 10, color: '#5b6470', width: 62, textAlign: 'right' }}>{rel(first)}</span>
+        </div>
+      )}
+      {rest.length > 0 && (
+        <>
+          <div className="os-mono" style={{ fontSize: 9.5, color: '#5b6470', letterSpacing: '.5px', textTransform: 'uppercase', margin: '4px 2px 4px' }}>then, approximately</div>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {rest.map((u, i) => (
+              <div key={u.at} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 2px', borderTop: i ? '1px solid #161b22' : 'none' }}>
+                <span className="os-mono" style={{ fontSize: 12, fontWeight: 600, color: '#cfd6df' }}>{fmtTime(u.minute)}</span>
+                {u.day > 0 && <span className="os-mono" style={{ fontSize: 9.5, color: '#5b6470' }}>tomorrow</span>}
+                <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>{rel(u)}</span>
+              </div>
+            ))}
           </div>
-        ))}
-        {!times.length && (
-          <span className="os-mono" style={{ fontSize: 11, color: '#5b6470' }}>
-            {idle ? 'follow a niche to start posting' : status.message || 'waiting for the worker to schedule the next post'}
-          </span>
-        )}
-      </div>
+        </>
+      )}
+      {!times.length && (
+        <span className="os-mono" style={{ fontSize: 11, color: '#5b6470' }}>
+          {idle ? 'select a niche to start posting' : status.message || 'waiting for the worker to schedule the next post'}
+        </span>
+      )}
     </Card>
   );
 }
@@ -386,10 +382,7 @@ function ActivityFeed({ ov }) {
   const rows = ov ? ov.activity : [];
   return (
     <Card style={{ padding: '16px 18px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 13 }}>
-        <div style={{ fontWeight: 600, fontSize: 13 }}>Activity</div>
-        <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>live · 5s poll</span>
-      </div>
+      <CardHeader title="Activity" sub="live" />
       <div style={{ display: 'flex', flexDirection: 'column' }}>
         {rows.map((e) => {
           const [fg, bg] = LEVEL_COLORS[e.level] || LEVEL_COLORS.info;
@@ -496,17 +489,9 @@ function SetupGuide({ setup }) {
                   {s.desc}
                 </div>
               </div>
-              <button
-                onClick={() => setRoute(s.route)}
-                className="run-btn"
-                style={{
-                  flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 7, border: 'none',
-                  cursor: 'pointer', fontSize: 12, fontWeight: 700, padding: '8px 14px', borderRadius: 8,
-                  background: isNext ? '#3ecf8e' : '#1c222b', color: isNext ? '#0a0c0f' : '#9aa3af',
-                }}
-              >
+              <Button variant={isNext ? 'primary' : 'secondary'} onClick={() => setRoute(s.route)}>
                 {s.cta} <ArrowRight size={13} />
-              </button>
+              </Button>
             </div>
           );
         })}
@@ -532,16 +517,16 @@ export default function Dashboard() {
   return (
     <div>
       <KpiRow ov={ov} dash={dash} />
-      <div className="os-grid-main" style={{ marginBottom: 14 }}>
+      {/* row 1: what came in vs. what goes out next (equal height) */}
+      <div className="os-grid-main" style={{ marginBottom: 14, alignItems: 'stretch' }}>
         <DailyChart dash={dash} />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <NextPosts sched={sched} />
-          <PostPipeline dash={dash} />
-        </div>
+        <NextPosts sched={sched} />
       </div>
+      {/* row 2: what gets posted next, and the numbers behind it */}
       <div className="os-grid-main" style={{ marginBottom: 14 }}>
         <TopStories dash={dash} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <PostPipeline dash={dash} />
           <NicheBreakdown dash={dash} />
           <SourceMix dash={dash} />
         </div>

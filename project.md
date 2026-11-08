@@ -144,7 +144,7 @@ Posts are written from knowledge-base stories. When an account has used every re
 Safety and modes (absorbed from the reference implementation):
 
 - **Dry-run by default** — publishing is live only when explicitly enabled (`POST_DRY_RUN=false`); any other value stays dry and only logs what *would* post. Fail-safe so nothing goes out by accident.
-- **`app_mode: manual | auto`** — in `manual`, the engine never publishes on its own; it writes drafts on the cadence (up to `max_pending_drafts`) and they wait until "Post now". In `auto`, posts publish on the cadence.
+- **`app_mode: manual | auto`** — every posting mark writes one draft. In `manual`, the engine never publishes on its own; drafts wait until "Post now". In `auto`, each mark also publishes the highest-priority draft written in the last 6 hours.
 - **Posting state machine** — a failed publish increments `post_attempts` and records `post_error`; after the max attempts the draft is marked `failed`.
 - **Overlap guard** — a scheduled job that is still running when its next tick fires skips that tick rather than running twice.
 

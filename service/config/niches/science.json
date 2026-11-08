@@ -34,14 +34,6 @@
     "arxiv": {
       "query": "cat:physics.gen-ph",
       "limit": 15
-    },
-    "rss": {
-      "category": "science",
-      "feeds": [
-        "https://www.nature.com/nature.rss",
-        "https://phys.org/rss-feed/",
-        "https://www.sciencedaily.com/rss/all.xml"
-      ]
     }
   }
 }

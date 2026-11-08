@@ -41,12 +41,6 @@
         "entrepreneurship"
       ],
       "enabled": false
-    },
-    "rss": {
-      "category": "startups",
-      "feeds": [
-        "https://www.ycombinator.com/blog/rss/"
-      ]
     }
   }
 }

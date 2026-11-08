@@ -28,31 +28,33 @@ import re
 # (``core/posttypes.py``); values say what kind of post to write. Written to
 # match how people actually post, not how outlets headline.
 POST_TYPE_TEMPLATES: dict[str, str] = {
+    # Every shape starts from what happened: a reader scrolling past has not
+    # seen the story, so a reaction without the news reads as nonsense.
     "news": (
         "Shape: say what happened in one plain sentence, then a blank line, then "
-        "your honest reaction in a sentence or two, in first person."
+        "your honest reaction in a sentence."
     ),
     "take": (
-        "Shape: a first person hot take on this. Pick a side and commit to it. "
-        "One to three short lines."
+        "Shape: say what happened in plain words, then your honest opinion on it "
+        "in a sentence. Only an opinion the facts actually support."
     ),
     "insight": (
-        "Shape: think out loud about what this means or where it leads. A short "
-        "musing, not a report."
+        "Shape: say what happened, then one thing it means or where it could "
+        "lead. A short thought, not a report."
     ),
     "question": (
-        "Shape: share the news in a line, then ask the question you actually "
+        "Shape: share the news in a line, then ask the one question you actually "
         "wonder about it."
     ),
     "spotlight": (
-        "Shape: point at the thing and say plainly why it caught your eye."
+        "Shape: say what this is in plain words and why it caught your eye."
     ),
     "tip": (
-        "Shape: the one practical takeaway for someone in this space, said like "
-        "you would tell a friend."
+        "Shape: say what happened, then the one practical thing someone in this "
+        "space should take from it."
     ),
     "meme": (
-        "Shape: a dry, funny one liner about it. No setup, just the line."
+        "Shape: a dry one liner about it that still makes clear what happened."
     ),
 }
 
@@ -65,8 +67,12 @@ SYNTHESIS_SHAPE = (
 
 RULES = (
     "Rules:\n"
+    "- The reader has not seen any article. Make clear what happened and who did it, "
+    "in words a smart person outside the field gets. Swap jargon for plain words.\n"
+    "- React only to what the facts say. Never invent numbers, claims or a stance "
+    "the facts do not support.\n"
     "- Sound like a person, not a news outlet or a brand. Plain words, short sentences.\n"
-    "- The reader has not seen any article. Name the company, person or thing you mean.\n"
+    "- No closing punchline, metaphor or wordplay. End on the point.\n"
     "- Never mention sources, outlets, links or 'according to'. No hashtags or emoji.\n"
     "- Return only the post text."
 )
@@ -79,7 +85,10 @@ DEFAULT_VOICE = (
 # Per-niche post style → a voice instruction. Keys match the dashboard buttons.
 STYLE_PROMPTS: dict[str, str] = {
     "casual": "Voice: casual and conversational, like talking to a peer.",
-    "funny": "Voice: witty and playful. Land a joke or a clever turn of phrase.",
+    "funny": (
+        "Voice: light and dry. Humor only where it comes naturally from the facts; "
+        "never bolt a joke onto the end."
+    ),
     "informative": "Voice: clear and informative. Lead with substance and why it matters.",
     "professional": "Voice: professional and precise, credible without being stiff.",
     "question": "Voice: curious. Lean into open questions that invite replies.",
