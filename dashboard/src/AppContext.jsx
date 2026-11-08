@@ -4,8 +4,25 @@ import { setNiches } from './data';
 
 const AppContext = createContext(null);
 
+// The current page lives in the URL hash (#/schedule), so a refresh stays on
+// the same page and the browser's back/forward buttons work.
+const ROUTES = ['dashboard', 'niches', 'queue', 'schedule', 'history', 'sources', 'rawdata', 'logs', 'settings'];
+const routeFromHash = () => {
+  const r = (window.location.hash || '').replace(/^#\/?/, '').split(/[/?]/)[0];
+  return ROUTES.includes(r) ? r : 'dashboard';
+};
+
 export function AppProvider({ children }) {
-  const [route, setRoute] = useState('dashboard');
+  const [route, setRouteState] = useState(routeFromHash);
+  const setRoute = useCallback((r) => {
+    if (window.location.hash !== `#/${r}`) window.location.hash = `/${r}`;
+    setRouteState(r);
+  }, []);
+  useEffect(() => {
+    const onHash = () => setRouteState(routeFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
   const [niche, setNiche] = useState('all');
   // The CURRENT workspace (one X account). The whole app operates within it.
   // Persisted so a reload returns to the same workspace. '' until accounts load.
@@ -125,7 +142,22 @@ export function AppProvider({ children }) {
   }, []);
 
   // ---- settings navigation (deep-link into the niche editor) ----------------
-  const [settingsTab, setSettingsTab] = useState('general');
+  // The Settings tab rides in the hash too (#/settings/ai) so a refresh or a
+  // shared link lands on the same tab.
+  const tabFromHash = () => {
+    const [r, t] = (window.location.hash || '').replace(/^#\/?/, '').split(/[/?]/);
+    return r === 'settings' && t ? t : null;
+  };
+  const [settingsTab, setSettingsTabState] = useState(() => tabFromHash() || 'general');
+  const setSettingsTab = useCallback((t) => {
+    setSettingsTabState(t);
+    if (routeFromHash() === 'settings') window.location.hash = `/settings/${t}`;
+  }, []);
+  useEffect(() => {
+    const onHash = () => { const t = tabFromHash(); if (t) setSettingsTabState(t); };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
   const [settingsNiche, setSettingsNiche] = useState(null); // open niche on the Niches page
 
   // Niche config now lives on the Niches page; deep-link selects it there.

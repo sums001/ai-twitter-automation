@@ -4,14 +4,11 @@ import { useApp } from '../AppContext';
 import { NICHE_COLOR, nicheLabel } from '../data';
 import { api, usePoll } from '../api';
 import { ago } from '../utils';
-import { Card, Toggle, SectionLabel } from '../components/common';
+import { Button, Card, FilterChip, Loading, SectionLabel, Segmented, Stat, Tag, Toggle, fieldStyle } from '../components/common';
 
 const LABEL_W = 250;
 
-const inputStyle = {
-  width: '100%', colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 8,
-  color: '#e7eaef', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, padding: '8px 10px',
-};
+const inputStyle = { ...fieldStyle, width: '100%', padding: '8px 10px' };
 const block = { background: '#0d1116', border: '1px solid #171c24', borderRadius: 11, padding: '14px 16px' };
 
 // Fallback cap if the service doesn't send max_origins.
@@ -75,12 +72,12 @@ const envLabel = (env) =>
   env.replace(/_API_KEY$|_TOKEN$/i, '').replace(/^[A-Z]+_/, '').replace(/_/g, ' ').toLowerCase() ||
   env.toLowerCase();
 
-function keyBadgeFor(src) {
-  if (!src.key) return { text: 'no key needed', style: { background: '#161b22', color: '#5b6470', fontWeight: 400 } };
-  if (src.key_set) return { text: 'key set ✓', style: { background: 'rgba(62,207,142,.12)', color: '#3ecf8e', fontWeight: 600 } };
+function KeyTag({ src }) {
+  if (!src.key) return null; // keyless is the norm, no tag needed
+  if (src.key_set) return <Tag fg="#3ecf8e" bg="rgba(62,207,142,.12)">key set</Tag>;
   return src.key === 'optional'
-    ? { text: 'key · optional', style: { background: '#161b22', color: '#9aa3af', fontWeight: 400 } }
-    : { text: 'key required', style: { background: 'rgba(245,69,92,.12)', color: '#f5455c', fontWeight: 600 } };
+    ? <Tag>key optional</Tag>
+    : <Tag fg="#f5455c" bg="rgba(245,69,92,.12)">key required</Tag>;
 }
 
 // ===========================================================================
@@ -180,13 +177,9 @@ function KeyEditor({ src, keySet, onSaved }) {
             <span className="os-mono" style={{ fontSize: 9, color: '#4b5563', flex: 1 }}>
               stored encrypted · also editable in Settings → Credentials
             </span>
-            <button
-              onClick={save}
-              className="run-btn"
-              style={{ border: 'none', cursor: canSave ? 'pointer' : 'default', fontSize: 11.5, fontWeight: 700, padding: '7px 16px', borderRadius: 8, background: canSave ? '#3ecf8e' : '#1c222b', color: canSave ? '#0a0c0f' : '#7a828f' }}
-            >
-              {busy ? 'Saving…' : done ? 'Saved ✓' : 'Save keys'}
-            </button>
+            <Button variant="primary" onClick={save} disabled={!canSave}>
+              {busy ? 'Saving…' : done ? 'Saved' : 'Save keys'}
+            </Button>
           </div>
         </div>
       )}
@@ -236,8 +229,8 @@ function OriginRow({ srcId, origin, niches, reload }) {
           onKeyDown={(e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') cancel(); }}
           style={{ ...inputStyle, flex: 1, width: 'auto', padding: '5px 8px', fontSize: 11 }}
         />
-        <button onClick={save} className="run-btn" style={{ border: 'none', background: '#3ecf8e', color: '#0a0c0f', cursor: 'pointer', fontSize: 10.5, fontWeight: 700, padding: '5px 11px', borderRadius: 6 }}>{busy ? 'saving…' : 'save'}</button>
-        <button onClick={cancel} className="os-mono hover-bright" style={{ border: 'none', background: 'transparent', color: '#7a828f', cursor: 'pointer', fontSize: 10, padding: '5px 5px' }}>cancel</button>
+        <Button size="sm" variant="primary" onClick={save}>{busy ? 'Saving…' : 'Save'}</Button>
+        <Button size="sm" variant="ghost" onClick={cancel}>Cancel</Button>
       </div>
     );
   }
@@ -294,13 +287,9 @@ function AddOrigin({ src, niches, reload, count, max }) {
             placeholder={src.origin_label || 'origin URL'}
             style={{ ...inputStyle, flex: 1, width: 'auto' }}
           />
-          <button
-            onClick={add}
-            className="run-btn"
-            style={{ border: 'none', background: ready ? '#3ecf8e' : '#1c222b', color: ready ? '#0a0c0f' : '#7a828f', cursor: ready ? 'pointer' : 'default', fontSize: 12, fontWeight: 700, padding: '8px 16px', borderRadius: 8, whiteSpace: 'nowrap' }}
-          >
-            {busy ? 'adding…' : '+ Add'}
-          </button>
+          <Button variant="primary" onClick={add} disabled={!ready || busy}>
+            {busy ? 'Adding…' : 'Add'}
+          </Button>
         </div>
       )}
     </div>
@@ -311,7 +300,6 @@ function AddOrigin({ src, niches, reload, count, max }) {
 // collapsed source row
 // ===========================================================================
 function SourceRow({ src, open, onToggle, onFetch, onToggleEnabled, fetching }) {
-  const badge = keyBadgeFor(src);
   const upcoming = src.upcoming;
   const dot = !src.enabled ? '#3b414b' : src.ok ? '#3ecf8e' : '#f5a524';
   const isDynamic = src.kind === 'dynamic';
@@ -332,10 +320,8 @@ function SourceRow({ src, open, onToggle, onFetch, onToggleEnabled, fetching }) 
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             <span style={{ fontSize: 13, fontWeight: open ? 700 : 600, color: open ? '#fff' : '#e7eaef', whiteSpace: 'nowrap' }}>{src.name}</span>
-            {upcoming && (
-              <span className="os-mono" style={{ fontSize: 8.5, padding: '2px 6px', borderRadius: 5, background: 'rgba(99,102,241,.14)', color: '#a5b4fc', fontWeight: 600, letterSpacing: '.04em' }}>UPCOMING</span>
-            )}
-            <span className="os-mono" style={{ fontSize: 8.5, padding: '2px 6px', borderRadius: 5, ...badge.style }}>{badge.text}</span>
+            {upcoming && <Tag fg="#a5b4fc" bg="rgba(99,102,241,.14)">upcoming</Tag>}
+            <KeyTag src={src} />
           </div>
           <div style={{ fontSize: 10, color: '#5b6470', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={src.description}>
             {src.description}
@@ -362,17 +348,16 @@ function SourceRow({ src, open, onToggle, onFetch, onToggleEnabled, fetching }) 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'flex-end' }} onClick={(e) => e.stopPropagation()}>
         <span className="os-mono" style={{ fontSize: 9.5, color: !src.enabled ? '#5b6470' : src.ok ? '#5b6470' : '#f5a524', whiteSpace: 'nowrap' }}>{lastInfo}</span>
         <InfoPopover src={src} />
-        <button
-          onClick={() => src.enabled && !fetching && onFetch()}
+        <Button
+          size="sm"
+          onClick={() => !fetching && onFetch()}
           disabled={!src.enabled}
-          className={src.enabled ? 'hover-border-text' : undefined}
-          title={upcoming ? 'coming soon — not available yet' : src.enabled ? 'fetch this source now' : 'source is disabled — enable it first ↑'}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 5, border: '1px solid #232932', background: 'transparent', color: !src.enabled ? '#3b414b' : fetching ? '#5b6470' : '#9aa3af', cursor: src.enabled ? 'pointer' : 'not-allowed', fontFamily: "'JetBrains Mono', monospace", fontSize: 10, padding: '6px 11px', borderRadius: 7, whiteSpace: 'nowrap' }}
+          title={upcoming ? 'coming soon, not available yet' : src.enabled ? 'fetch this source now' : 'enable the source first'}
+          icon={<RefreshCw size={11} style={fetching ? { animation: 'os-spin 1s linear infinite' } : undefined} />}
         >
-          <RefreshCw size={11} style={fetching ? { animation: 'os-spin 1s linear infinite' } : undefined} />
-          {fetching ? 'fetching…' : 'fetch'}
-        </button>
-        <Toggle on={src.enabled} onClick={onToggleEnabled} size={20} disabled={upcoming} title={upcoming ? 'coming soon — can’t be enabled yet' : 'enable / disable globally'} />
+          {fetching ? 'Fetching…' : 'Fetch'}
+        </Button>
+        <Toggle on={src.enabled} onClick={onToggleEnabled} disabled={upcoming} title={upcoming ? 'coming soon — can’t be enabled yet' : 'enable / disable globally'} />
       </div>
     </div>
   );
@@ -500,28 +485,13 @@ export default function Sources() {
   const originsTotal = normalized.reduce((a, s) => a + (s.origins || []).length, 0);
   const missingKeys = normalized.filter((s) => s.needs_key && !s.upcoming).length;
 
-  const seg = (id, label, count) => (
-    <button
-      key={id}
-      onClick={() => setFilter(id)}
-      className={filter === id ? '' : 'hover-bright'}
-      style={{
-        border: 'none', cursor: 'pointer', fontSize: 11.5, fontWeight: 600, padding: '6px 13px', borderRadius: 7,
-        background: filter === id ? '#1c222b' : 'transparent', color: filter === id ? '#e7eaef' : '#7a828f',
-        fontFamily: 'inherit',
-      }}
-    >
-      {label} <span className="os-mono" style={{ fontSize: 9.5, color: filter === id ? '#5b6470' : '#444b55' }}>{count}</span>
-    </button>
-  );
-
   return (
-    <Card style={{ padding: '4px 20px 8px' }}>
+    <Card style={{ padding: '0 18px 8px' }}>
       {/* ===== summary header ===== */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 22, flexWrap: 'wrap', padding: '16px 0', borderBottom: '1px solid #1a1f27' }}>
         <div>
-          <div style={{ fontSize: 15, fontWeight: 700 }}>Content sources</div>
-          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>where post material comes from · click a row to configure</div>
+          <div style={{ fontSize: 13.5, fontWeight: 600 }}>Content sources</div>
+          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 3 }}>shared by every workspace · click a row to configure</div>
         </div>
         <div style={{ display: 'flex', gap: 26, marginLeft: 4 }}>
           <Stat value={active} label={`active / ${total}`} color="#e7eaef" />
@@ -541,42 +511,39 @@ export default function Sources() {
       {/* ===== controls + list ===== */}
       <div style={{ paddingTop: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', gap: 2, background: '#0d1116', border: '1px solid #1a1f27', borderRadius: 9, padding: 3 }}>
-            {seg('all', 'All', total)}
-            {seg('free', 'No key needed', normalized.filter((s) => !needsKeyGroup(s)).length)}
-            {seg('keyed', 'Needs a key', normalized.filter(needsKeyGroup).length)}
-          </div>
+          <Segmented
+            options={[
+              ['all', 'All', total],
+              ['free', 'No key needed', normalized.filter((s) => !needsKeyGroup(s)).length],
+              ['keyed', 'Needs a key', normalized.filter(needsKeyGroup).length],
+            ]}
+            value={filter}
+            onChange={setFilter}
+          />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Filter sources…"
-            style={{ width: 170, colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 8, color: '#e7eaef', fontFamily: 'inherit', fontSize: 11.5, padding: '7px 11px' }}
+            style={{ ...fieldStyle, width: 170, fontFamily: 'inherit', padding: '7px 11px' }}
           />
-          <button
+          <FilterChip
+            active={selectedOnly}
             onClick={() => setSelectedOnly((v) => !v)}
-            className={selectedOnly ? '' : 'hover-bright'}
+            icon={<Star size={12} style={{ flexShrink: 0 }} />}
             title="show only sources that support a selected niche (dynamic sources always shown)"
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontSize: 11.5, fontWeight: 600,
-              fontFamily: 'inherit', padding: '6px 12px', borderRadius: 8,
-              border: `1px solid ${selectedOnly ? 'rgba(62,207,142,.35)' : '#1c212a'}`,
-              background: selectedOnly ? 'rgba(62,207,142,.1)' : '#0d1116',
-              color: selectedOnly ? '#3ecf8e' : '#7a828f',
-            }}
           >
-            <Star size={12} style={{ flexShrink: 0 }} />
             Selected niches only
-          </button>
+          </FilterChip>
           <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>
             {selectedOnly && selectedSet.size === 0
-              ? 'no niches selected — showing all sources'
+              ? 'no niches selected · showing all sources'
               : hiddenBySelected > 0
-                ? `${hiddenBySelected} source${hiddenBySelected > 1 ? 's' : ''} hidden — not in a selected niche`
-                : missingKeys > 0 ? `${missingKeys} source${missingKeys > 1 ? 's' : ''} need a key — set it inline ↓` : 'click any row to edit it inline ↓'}
+                ? `${hiddenBySelected} source${hiddenBySelected > 1 ? 's' : ''} hidden · not in a selected niche`
+                : missingKeys > 0 ? `${missingKeys} source${missingKeys > 1 ? 's' : ''} need a key` : `${visible.length} source${visible.length === 1 ? '' : 's'}`}
           </span>
         </div>
 
-        {!sources && <div className="os-mono" style={{ fontSize: 11, color: '#5b6470', padding: '24px 0', textAlign: 'center' }}>loading sources…</div>}
+        {!sources && <Loading>loading sources…</Loading>}
 
         {sources && visible.length === 0 && (
           <div className="os-mono" style={{ fontSize: 11, color: '#5b6470', padding: '28px 0', textAlign: 'center' }}>no sources match this filter</div>
@@ -602,14 +569,5 @@ export default function Sources() {
         })}
       </div>
     </Card>
-  );
-}
-
-function Stat({ value, label, color }) {
-  return (
-    <div>
-      <div className="os-mono" style={{ fontSize: 20, fontWeight: 700, color, lineHeight: 1 }}>{value}</div>
-      <div className="os-mono" style={{ fontSize: 9, color: '#5b6470', marginTop: 4 }}>{label}</div>
-    </div>
   );
 }

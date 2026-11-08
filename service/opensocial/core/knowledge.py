@@ -489,6 +489,7 @@ _UNPOSTABLE = [
     re.compile(p, re.IGNORECASE)
     for p in (
         r"^(is|are|should|could|can|will|does|do|did)\b.*\?$",
+        r"^(ask|tell|show|launch)\s+hn\b",  # forum threads, not news
         r"\b(top|best)\s+\d+\b",
         r"\bhere'?s\s+(why|what|how|everything)\b",
         r"\bprice\s+prediction\b",

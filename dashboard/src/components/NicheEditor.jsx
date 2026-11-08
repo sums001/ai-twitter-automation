@@ -1,8 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '../AppContext';
-import { NICHE_COLOR, nicheLabel } from '../data';
+import { nicheLabel, TYPE_COLORS } from '../data';
 import { api } from '../api';
-import { Card, Toggle } from './common';
+import { C, SaveButton, Toggle, fieldStyle, textareaStyle } from './common';
+
+// The seven tones (core/posttypes.ALL_TONES); hints follow the shapes in
+// ai/prompts.POST_TYPE_TEMPLATES.
+const TONES = [
+  ['news', 'News', 'what happened + your reaction'],
+  ['spotlight', 'Spotlight', 'why this caught your eye'],
+  ['insight', 'Insight', 'what it means, where it leads'],
+  ['take', 'Take', 'pick a side and commit'],
+  ['tip', 'Tip', 'one practical takeaway'],
+  ['question', 'Question', 'the question it raises'],
+  ['meme', 'Meme', 'a dry one-liner'],
+];
 
 // Per-niche post text controls (Voice column).
 const POST_STYLES = [
@@ -14,11 +26,7 @@ const POST_LENGTHS = [
   ['medium', 'Medium', '1–2 lines'], ['long', 'Long', '3–4 lines'],
 ];
 
-const inputStyle = {
-  colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 8,
-  color: '#e7eaef', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, padding: '8px 11px',
-};
-const numStyle = { ...inputStyle, width: 86, textAlign: 'center', fontWeight: 600 };
+const inputStyle = fieldStyle;
 
 const chip = (fg, bg, border) => ({
   fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: fg, background: bg,
@@ -67,7 +75,7 @@ function ChipList({ items, onChange, fg, bg, border, placeholder }) {
 }
 
 // A grid of single-select option buttons (post style / length).
-function SelectGrid({ options, value, onChange, color, cols = 3 }) {
+function SelectGrid({ options, value, onChange, cols = 3 }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: 9 }}>
       {options.map(([key, label, hint]) => {
@@ -77,13 +85,14 @@ function SelectGrid({ options, value, onChange, color, cols = 3 }) {
             key={key}
             onClick={() => onChange(on ? '' : key)}
             style={{
-              cursor: 'pointer', textAlign: 'center', padding: '12px 10px', borderRadius: 10,
-              background: on ? `color-mix(in oklch, ${color} 14%, transparent)` : '#0d1116',
-              border: on ? `1px solid ${color}` : '1px solid #1c212a',
-              color: on ? '#e7eaef' : '#9aa3af', transition: 'all .12s',
+              cursor: 'pointer', textAlign: 'center', padding: '10px 10px', borderRadius: 9,
+              fontFamily: 'inherit',
+              background: on ? 'rgba(62,207,142,.1)' : C.inset,
+              border: on ? '1px solid rgba(62,207,142,.45)' : '1px solid #1c212a',
+              color: on ? C.text : C.muted, transition: 'all .12s',
             }}
           >
-            <div style={{ fontSize: 13, fontWeight: 600 }}>{label}</div>
+            <div style={{ fontSize: 12.5, fontWeight: 600 }}>{label}</div>
             {hint && <div className="os-mono" style={{ fontSize: 9.5, color: on ? '#9aa3af' : '#5b6470', marginTop: 3 }}>{hint}</div>}
           </button>
         );
@@ -115,7 +124,7 @@ function Field({ title, hint, right, children }) {
 }
 
 // Column 1 — who the niche is and how its posts sound.
-function VoiceColumn({ cfg, set, color }) {
+function VoiceColumn({ cfg, set }) {
   const persona = cfg.persona || {};
   return (
     <div>
@@ -128,24 +137,27 @@ function VoiceColumn({ cfg, set, color }) {
         />
       </Field>
       <Field title="Post style" hint="the voice every post is written in">
-        <SelectGrid options={POST_STYLES} value={persona.style || ''} onChange={(v) => set(['persona', 'style'], v)} color={color} cols={2} />
+        <SelectGrid options={POST_STYLES} value={persona.style || ''} onChange={(v) => set(['persona', 'style'], v)} cols={2} />
       </Field>
       <Field title="Post length">
-        <SelectGrid options={POST_LENGTHS} value={persona.length || ''} onChange={(v) => set(['persona', 'length'], v)} color={color} cols={2} />
+        <SelectGrid options={POST_LENGTHS} value={persona.length || ''} onChange={(v) => set(['persona', 'length'], v)} cols={2} />
       </Field>
     </div>
   );
 }
 
-// Column 2 — extra guidance, images, and an optional voice override.
+// Column 2 — extra guidance, images, and which tones posts are written in.
 function ContentColumn({ cfg, set }) {
   const persona = cfg.persona || {};
-  // Optional per-niche voice samples, edited as one text block split on '---'.
-  const examples = Array.isArray(persona.examples) ? persona.examples : [];
-  const textarea = {
-    width: '100%', boxSizing: 'border-box', colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a',
-    borderRadius: 10, padding: 12, fontSize: 13, lineHeight: 1.55, color: '#d5dae1',
-    fontFamily: 'inherit', resize: 'vertical',
+  const textarea = textareaStyle;
+  // Mirrors PostTypesConfig.enabled_tones: no block (or nothing enabled) = all.
+  const pt = cfg.post_types || {};
+  const declared = TONES.map(([k]) => k).filter((k) => pt[k] && pt[k].enabled !== false);
+  const on = declared.length ? declared : TONES.map(([k]) => k);
+  // Always write the full block so the saved file states every tone explicitly.
+  const toggleTone = (key) => {
+    const next = on.includes(key) ? on.filter((k) => k !== key) : [...on, key];
+    set(['post_types'], Object.fromEntries(TONES.map(([k]) => [k, { enabled: next.includes(k) }])));
   };
   return (
     <div>
@@ -170,20 +182,33 @@ function ContentColumn({ cfg, set }) {
           <option value="content">Content (source media)</option>
         </select>
       </Field>
-      <Field
-        title="Voice override"
-        hint="optional · this niche's own sample posts, separated by a line with ---; empty uses the account's samples (Settings → General)"
-      >
-        <textarea
-          value={examples.join('\n---\n')}
-          onChange={(e) => {
-            const parts = e.target.value.split(/\n-{3,}\n/);
-            set(['persona', 'examples'], parts.every((x) => !x.trim()) ? [] : parts);
-          }}
-          rows={4}
-          placeholder={'a post this niche should sound like\n---\nanother one'}
-          style={textarea}
-        />
+      <Field title="Tones" hint={`each post uses one of these, never the same twice in a row · ${on.length} of ${TONES.length} on`}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 9 }}>
+          {TONES.map(([key, name, hint]) => {
+            const active = on.includes(key);
+            const last = active && on.length === 1;
+            return (
+              <button
+                key={key}
+                onClick={() => !last && toggleTone(key)}
+                title={last ? 'at least one tone stays on' : undefined}
+                style={{
+                  cursor: last ? 'not-allowed' : 'pointer', textAlign: 'left', padding: '9px 11px', borderRadius: 9,
+                  fontFamily: 'inherit',
+                  background: active ? 'rgba(62,207,142,.1)' : C.inset,
+                  border: active ? '1px solid rgba(62,207,142,.45)' : '1px solid #1c212a',
+                  color: active ? C.text : C.muted, transition: 'all .12s',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12.5, fontWeight: 600 }}>
+                  <span style={{ width: 7, height: 7, borderRadius: 999, background: active ? TYPE_COLORS[key][0] : '#3a414c' }} />
+                  {name}
+                </div>
+                <div className="os-mono" style={{ fontSize: 9.5, color: active ? '#9aa3af' : '#5b6470', marginTop: 3 }}>{hint}</div>
+              </button>
+            );
+          })}
+        </div>
       </Field>
     </div>
   );
@@ -218,10 +243,9 @@ function FilterColumn({ cfg, set }) {
           {names.map((name) => {
             const enabled = (sources[name] || {}).enabled !== false;
             return (
-              <div key={name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 11px', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 8 }}>
-                <span style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, background: enabled ? '#3ecf8e' : '#3b414b' }} />
-                <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: '#e7eaef' }}>{name}</span>
-                <Toggle on={enabled} onClick={() => set(['sources', name, 'enabled'], !enabled)} size={16} />
+              <div key={name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 11px', background: C.inset, border: '1px solid #1c212a', borderRadius: 8 }}>
+                <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: enabled ? C.text : C.dim }}>{name}</span>
+                <Toggle on={enabled} onClick={() => set(['sources', name, 'enabled'], !enabled)} size={18} />
               </div>
             );
           })}
@@ -244,7 +268,6 @@ function deepSet(obj, path, value) {
 
 export default function NicheEditor() {
   const { settingsNiche } = useApp();
-  const color = NICHE_COLOR[settingsNiche];
   const [cfg, setCfg] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -272,42 +295,26 @@ export default function NicheEditor() {
       .finally(() => setSaving(false));
   };
 
+  // The niche's name is already on the row above, so the editor opens straight
+  // into its fields, with the file path and save action in a slim bar.
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginBottom: 14 }}>
-        <span style={{ width: 11, height: 11, borderRadius: 3, background: color }} />
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: '-.3px' }}>{nicheLabel(settingsNiche)}</div>
-          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>
-            editing config/niches/{settingsNiche}.json{dirty ? ' · unsaved changes' : ''}
-          </div>
-        </div>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-          <button
-            onClick={save}
-            className="run-btn"
-            style={{
-              border: 'none', cursor: dirty ? 'pointer' : 'default', fontSize: 12, fontWeight: 700,
-              padding: '8px 16px', borderRadius: 8,
-              background: dirty ? '#3ecf8e' : '#1c222b', color: dirty ? '#0a0c0f' : '#7a828f',
-            }}
-          >
-            {saving ? 'Saving…' : dirty ? 'Save config' : 'Saved'}
-          </button>
+    <div style={{ background: C.inset, border: '1px solid #171c24', borderRadius: 11, padding: '4px 20px 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 0', borderBottom: `1px solid ${C.line}` }}>
+        <span className="os-mono" style={{ fontSize: 10, color: C.faint }}>config/niches/{settingsNiche}.json</span>
+        {dirty && <span className="os-mono" style={{ fontSize: 10, color: C.amber }}>· unsaved changes</span>}
+        <div style={{ marginLeft: 'auto' }}>
+          <SaveButton dirty={dirty} saving={saving} onClick={save} label="Save niche" disabled={!cfg} />
         </div>
       </div>
-
-      <Card style={{ padding: '6px 22px 22px' }}>
-        {error && <div className="os-mono" style={{ fontSize: 11, color: '#f5455c', paddingTop: 16 }}>{error}</div>}
-        {!cfg && !error && <div className="os-mono" style={{ fontSize: 11, color: '#5b6470', paddingTop: 16 }}>loading config…</div>}
-        {cfg && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '18px 32px', alignItems: 'start', paddingTop: 10 }}>
-            <VoiceColumn cfg={cfg} set={set} color={color} />
-            <ContentColumn cfg={cfg} set={set} />
-            <FilterColumn cfg={cfg} set={set} />
-          </div>
-        )}
-      </Card>
+      {error && <div className="os-mono" style={{ fontSize: 11, color: C.red, paddingTop: 16 }}>{error}</div>}
+      {!cfg && !error && <div className="os-mono" style={{ fontSize: 11, color: C.faint, paddingTop: 16 }}>loading config…</div>}
+      {cfg && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '18px 32px', alignItems: 'start', paddingTop: 14 }}>
+          <VoiceColumn cfg={cfg} set={set} />
+          <ContentColumn cfg={cfg} set={set} />
+          <FilterColumn cfg={cfg} set={set} />
+        </div>
+      )}
     </div>
   );
 }

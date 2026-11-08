@@ -251,7 +251,7 @@ def test_schedule_put_saves_cadence_and_validates(client):
     assert res.status_code == 200
     cad = res.json()["cadence"]
     assert cad == {"window": ["08:00", "22:00"], "every_minutes": 30, "jitter_pct": 25,
-                   "min_gap_minutes": 15, "max_pending_drafts": 4}
+                   "min_gap_minutes": 15}
     assert client.get(f"/api/schedule?account={acct}").json()["cadence"]["every_minutes"] == 30
     bad = {"window": ["22:00", "08:00"], "every_minutes": 30}
     assert client.put(f"/api/schedule?account={acct}", json=bad).status_code == 422
@@ -449,6 +449,14 @@ def test_ai_config_default_and_put(client):
     assert set(body["key_status"]) == {
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GROQ_API_KEY",
+        "MISTRAL_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "LOCAL_LLM_API_KEY",
+        "CLOUDFLARE_API_TOKEN",
+        "CUSTOM_LLM_API_KEY",
         "UNSPLASH_ACCESS_KEY",
     }
 
@@ -477,6 +485,97 @@ def test_ai_local_provider_requires_endpoint(client):
     )
     assert ok.status_code == 200
     assert ok.json()["text"]["endpoint"] == "http://localhost:11434"
+
+
+def test_ai_providers_registry(client):
+    providers = {p["id"]: p for p in client.get("/api/ai/providers").json()}
+    assert {"claude", "chatgpt", "gemini", "local", "template"} <= set(providers)
+    # local takes an optional key and needs an endpoint
+    assert providers["local"]["key_env"] == "LOCAL_LLM_API_KEY"
+    assert providers["local"]["key_required"] is False
+    assert providers["local"]["endpoint_required"] is True
+    assert providers["template"]["key_env"] is None
+    # an unknown provider is rejected
+    assert client.put("/api/ai", json={"text": {"provider": "nope"}}).status_code == 422
+
+
+def test_ai_test_hosted_provider_needs_key(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    res = client.post("/api/ai/test", json={"text": {"provider": "gemini"}}).json()
+    assert res["ok"] is False and "GEMINI_API_KEY" in res["error"]
+
+
+def test_qualify_model_adds_provider_route():
+    from opensocial.ai.text import qualify_model
+
+    assert qualify_model("claude", "claude-haiku-5-5") == "anthropic/claude-haiku-5-5"
+    assert qualify_model("claude", "anthropic/claude-haiku-5-5") == "anthropic/claude-haiku-5-5"
+    assert qualify_model("openrouter", "meta-llama/llama-3.3-70b-instruct") == (
+        "openrouter/meta-llama/llama-3.3-70b-instruct"
+    )
+    assert qualify_model("local", "ollama/gemma3:4b") == "ollama/gemma3:4b"
+    # custom: OpenAI-compatible unless the id already names a LiteLLM route
+    assert qualify_model("custom", "my-model") == "openai/my-model"
+    assert qualify_model("custom", "meta-llama/Llama-3.3-70B") == "openai/meta-llama/Llama-3.3-70B"
+    assert qualify_model("custom", "together_ai/x/y") == "together_ai/x/y"
+
+
+def test_custom_provider_needs_endpoint_and_model(client):
+    providers = {p["id"]: p for p in client.get("/api/ai/providers").json()}
+    custom = providers["custom"]
+    assert custom["key_env"] == "CUSTOM_LLM_API_KEY" and custom["key_required"] is False
+    assert client.put("/api/ai", json={"text": {"provider": "custom", "model": "m"}}).status_code == 422
+    assert client.put(
+        "/api/ai", json={"text": {"provider": "custom", "endpoint": "https://x.test/v1"}}
+    ).status_code == 422
+    ok = client.put(
+        "/api/ai",
+        json={"text": {"provider": "custom", "endpoint": "https://x.test/v1", "model": "m"}},
+    )
+    assert ok.status_code == 200 and ok.json()["text"]["provider"] == "custom"
+
+
+def test_cloudflare_provider_builds_endpoint_from_account_id(client):
+    from opensocial.ai.text import get_text_provider
+
+    acct = "f" * 32
+    # account id is required
+    assert client.put("/api/ai", json={"text": {"provider": "cloudflare"}}).status_code == 422
+    # pasted as a dashboard URL, it is stored as the bare id
+    saved = client.put(
+        "/api/ai",
+        json={"text": {"provider": "cloudflare", "account_id": f"https://dash.cloudflare.com/{acct}"
+                       .replace("dash.cloudflare.com/", "dash.cloudflare.com/accounts/")}},
+    ).json()["text"]
+    assert saved["account_id"] == acct
+    # no inherited localhost endpoint or ollama model from the local default
+    assert "endpoint" not in saved and "model" not in saved
+
+    p = get_text_provider({"ai": {"text": {**saved, "api_key": "t"}}})
+    assert p.api_base == f"https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1"
+    assert p.model == "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    # an explicit base URL (AI Gateway) wins over the template
+    gw = get_text_provider({"ai": {"text": {**saved, "endpoint": "https://gw.test/v1", "model": "@cf/qwen/qwen3.8-27b"}}})
+    assert gw.api_base == "https://gw.test/v1" and gw.model == "openai/@cf/qwen/qwen3.8-27b"
+
+
+def test_custom_provider_builds_keyless_openai_route():
+    from opensocial.ai.text import get_text_provider
+
+    p = get_text_provider(
+        {"ai": {"text": {"provider": "custom", "endpoint": "https://x.test/v1", "model": "m"}}}
+    )
+    assert p.model == "openai/m" and p.api_base == "https://x.test/v1" and p.api_key == "local"
+
+
+def test_settings_patch_install_limits(client):
+    body = client.patch(
+        "/api/settings", json={"global_daily_cap": 12, "max_post_attempts": 5}
+    ).json()
+    assert body["global_daily_cap"] == 12
+    assert body["max_post_attempts"] == 5
+    assert client.patch("/api/settings", json={"max_post_attempts": 0}).status_code == 422
+    assert client.patch("/api/settings", json={"global_daily_cap": -1}).status_code == 422
 
 
 # --- commands -----------------------------------------------------------------
@@ -576,6 +675,23 @@ def test_ai_keys_are_per_workspace(client, monkeypatch):
     # scoped AI keys never leak into the process env
     import os
     assert os.environ.get("OPENAI_API_KEY") is None
+
+    # removing A's key clears it for A only
+    r = client.delete(f"/api/credentials?key=OPENAI_API_KEY&account={a}").json()
+    assert r["removed"] is True and r["set"] is False
+    assert client.get("/api/ai?account=" + a).json()["key_status"]["OPENAI_API_KEY"] is False
+    assert client.delete("/api/credentials?key=PATH").status_code == 422
+
+
+def test_global_credential_delete_drops_env(client, monkeypatch):
+    import os
+
+    monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)
+    client.post("/api/credentials", json={"key": "GUARDIAN_API_KEY", "value": "sek-del"})
+    assert os.environ["GUARDIAN_API_KEY"] == "sek-del"
+    r = client.delete("/api/credentials?key=GUARDIAN_API_KEY").json()
+    assert r["removed"] is True and r["set"] is False
+    assert "GUARDIAN_API_KEY" not in os.environ
 
 
 def test_x_credentials_are_per_workspace(client):

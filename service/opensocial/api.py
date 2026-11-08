@@ -75,6 +75,8 @@ from opensocial.core.settings import (
     set_scoped_setting,
     set_voice_samples,
 )
+from opensocial.ai.text import AI_KEY_ENVS
+from opensocial.ai.text import PROVIDERS as AI_PROVIDERS
 from opensocial.sources import available_sources, get_source
 
 # ---------------------------------------------------------------------------
@@ -94,8 +96,11 @@ def _origin_source(name: str):
 # (stored as an encrypted platform account, not env secrets). Source keys are
 # derived from the registry, so adding a keyed source needs no change here.
 CREDENTIAL_GROUPS: list[tuple[str, tuple[str, ...]]] = [
-    ("OpenAI", ("OPENAI_API_KEY",)),
-    ("Anthropic", ("ANTHROPIC_API_KEY",)),
+    *(
+        (spec["label"], (spec["key_env"],))
+        for spec in AI_PROVIDERS.values()
+        if spec["key_env"]
+    ),
     *(
         (get_source(n).label or n, get_source(n).key_envs)
         for n in available_sources()
@@ -106,14 +111,12 @@ CREDENTIAL_GROUPS: list[tuple[str, tuple[str, ...]]] = [
 
 ALLOWED_SECRET_ENVS = {env for _, envs in CREDENTIAL_GROUPS for env in envs}
 
-# AI provider keys surfaced inline on the AI providers card (set/not-set).
-AI_KEY_ENVS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
-
 # Per-workspace credential keys (stored under ``ws:<id>:secret:<ENV>``, never
 # injected into ``os.environ``) whose set/not-set status the dashboard surfaces
-# via ``/api/ai``. AI keys authenticate text generation; Unsplash authenticates
-# image lookups for niches whose image source is Unsplash. The *source* API keys
-# (YouTube, Guardian, NASA…) stay global — set on the Sources tab.
+# via ``/api/ai``. AI keys (one per provider in ``ai.text.PROVIDERS``)
+# authenticate text generation; Unsplash authenticates image lookups for niches
+# whose image source is Unsplash. The *source* API keys (YouTube, Guardian…)
+# stay global.
 WORKSPACE_KEY_ENVS = (*AI_KEY_ENVS, "UNSPLASH_ACCESS_KEY")
 
 COMMAND_TYPES = {
@@ -186,7 +189,8 @@ def inject_stored_secrets(session_factory) -> int:
 class SettingsPatch(BaseModel):
     dry_run: bool | None = None
     app_mode: str | None = None
-    global_daily_cap: int | None = None
+    global_daily_cap: int | None = None  # install-wide backstop (0 = none)
+    max_post_attempts: int | None = None  # publish retries before a draft fails
     story_ttl_hours: int | None = None  # forget unused stories after this long
 
 
@@ -259,7 +263,7 @@ class CadencePut(BaseModel):
     every_minutes: int  # one post roughly this often inside the window
     jitter_pct: int = 20  # each gap randomized by ± this percent
     min_gap_minutes: int = 20  # safety: never two posts closer than this
-    max_pending_drafts: int = 3  # manual mode: stop drafting at this many waiting
+    max_pending_drafts: int | None = None  # ignored (removed); accepted for old clients
 
 
 class VoiceIn(BaseModel):
@@ -389,6 +393,15 @@ def create_app(
                 if patch.app_mode not in ("manual", "auto"):
                     raise HTTPException(422, "app_mode must be 'manual' or 'auto'")
                 set_scoped_setting(s, account, "app_mode", patch.app_mode)
+            # Install-wide limits (not per workspace).
+            if patch.global_daily_cap is not None:
+                if not 0 <= patch.global_daily_cap <= 1000:
+                    raise HTTPException(422, "global_daily_cap must be between 0 and 1000")
+                set_app_setting(s, "global_daily_cap", str(patch.global_daily_cap))
+            if patch.max_post_attempts is not None:
+                if not 1 <= patch.max_post_attempts <= 10:
+                    raise HTTPException(422, "max_post_attempts must be between 1 and 10")
+                set_app_setting(s, "max_post_attempts", str(patch.max_post_attempts))
         return status(account)
 
     @app.post("/api/reset")
@@ -910,7 +923,6 @@ def create_app(
             every_minutes=body.every_minutes,
             jitter_pct=body.jitter_pct,
             min_gap_minutes=body.min_gap_minutes,
-            max_pending_drafts=body.max_pending_drafts,
         )
         with session_factory() as s:
             try:
@@ -1418,6 +1430,27 @@ def create_app(
             for env in WORKSPACE_KEY_ENVS
         }
 
+    @app.get("/api/ai/providers")
+    def ai_providers():
+        """The selectable text providers (``ai.text.PROVIDERS``), in order."""
+        return [{"id": pid, **spec} for pid, spec in AI_PROVIDERS.items()]
+
+    def _ai_text_error(text: dict) -> str | None:
+        from opensocial.ai.text import canonical_provider, missing_fields
+
+        pid = canonical_provider(text.get("provider"))
+        spec = AI_PROVIDERS.get(pid)
+        if spec is None:
+            return f"unknown provider {text.get('provider')!r}"
+        missing = missing_fields(pid, text)
+        if missing:
+            return f"{', '.join(missing)} is required for the {spec['label']} provider"
+        if spec.get("endpoint_required") and not (text.get("endpoint") or "").strip():
+            return f"endpoint is required for the {pid} provider"
+        if spec.get("model_required") and not (text.get("model") or "").strip():
+            return f"a model id is required for the {pid} provider"
+        return None
+
     @app.get("/api/ai")
     def get_ai(account: str | None = None):
         with session_factory() as s:
@@ -1429,9 +1462,16 @@ def create_app(
 
     @app.put("/api/ai")
     def put_ai(body: AiConfigIn, account: str | None = None):
-        text = body.text or {}
-        if (text.get("provider") or "").lower() == "local" and not (text.get("endpoint") or "").strip():
-            raise HTTPException(422, "endpoint is required for the local provider")
+        from opensocial.ai.text import canonical_provider, clean_field
+
+        text = dict(body.text or {})
+        error = _ai_text_error(text)
+        if error:
+            raise HTTPException(422, error)
+        # Store provider fields cleaned (an account id pasted as a URL → the id).
+        spec = AI_PROVIDERS.get(canonical_provider(text.get("provider"))) or {}
+        for f in spec.get("fields", []):
+            text[f["key"]] = clean_field(f["key"], text.get(f["key"]))
         with session_factory() as s:
             saved = save_ai_config(s, {"text": text}, account)
             saved["key_status"] = _ai_key_status(s, account)
@@ -1447,21 +1487,32 @@ def create_app(
         """
         import time
 
-        from opensocial.ai.text import PROVIDER_KEY_ENV, TextProviderError, get_text_provider
+        from opensocial.ai.text import (
+            PROVIDER_KEY_ENV,
+            TextProviderError,
+            canonical_provider,
+            get_text_provider,
+            key_required,
+            qualify_model,
+        )
         from opensocial.core.settings import get_scoped_secret
 
         text = dict(body.text or {})
-        provider_name = (text.get("provider") or "local").lower()
-        if provider_name == "local" and not (text.get("endpoint") or "").strip():
-            return {"ok": False, "error": "endpoint is required for the local provider"}
+        provider_name = canonical_provider(text.get("provider"))
+        error = _ai_text_error(text)
+        if error:
+            return {"ok": False, "error": error}
 
         env = PROVIDER_KEY_ENV.get(provider_name)
         if env:
             with session_factory() as s:
                 key = get_scoped_secret(s, account, env) or os.environ.get(env)
-            if not key:
+            if key:
+                text["api_key"] = key
+            elif key_required(provider_name):
                 return {"ok": False, "error": f"no API key set ({env})"}
-            text["api_key"] = key
+        if text.get("model"):
+            text["model"] = qualify_model(provider_name, text["model"])
         # Keep the probe cheap and bounded regardless of the saved settings.
         text["max_tokens"] = 16
         try:
@@ -1593,6 +1644,38 @@ def create_app(
                 set_app_setting(s, f"secret:{body.key}", blob.decode("ascii"))
                 os.environ[body.key] = body.value.strip()
         return {"key": body.key, "set": True}
+
+    @app.delete("/api/credentials")
+    def delete_credential(key: str, account: str | None = None):
+        """Remove a stored credential (per workspace with ``account``, else global).
+
+        A global key is also dropped from the process env when it was the stored
+        value that put it there; an operator-set env var is left alone.
+        """
+        from opensocial.core.db import AppSetting
+        from opensocial.core.secrets import SecretsError, decrypt_credentials
+
+        if key not in ALLOWED_SECRET_ENVS:
+            raise HTTPException(422, f"unknown credential key {key!r}")
+        setting = f"ws:{account}:secret:{key}" if account else f"secret:{key}"
+        with session_factory() as s:
+            row = s.get(AppSetting, setting)
+            if row is not None:
+                if not account:
+                    try:
+                        stored = decrypt_credentials(
+                            row.value.encode("ascii"), resolve_settings(s).secret_key
+                        ).get("value")
+                    except SecretsError:
+                        stored = None
+                    if stored and os.environ.get(key) == stored:
+                        os.environ.pop(key, None)
+                s.delete(row)
+                s.commit()
+            still_set = (
+                has_scoped_secret(s, account, key) if account else False
+            ) or bool(os.environ.get(key))
+        return {"key": key, "removed": row is not None, "set": still_set}
 
     @app.post("/api/credentials/x")
     def set_x_account(body: XAccountIn):

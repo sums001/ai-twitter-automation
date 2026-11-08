@@ -52,7 +52,7 @@ NICHE = {
     "image_source": "none",
 }
 ALL_DAY = Cadence(window=("00:00", "23:59"), every_minutes=60, jitter_pct=20,
-                  min_gap_minutes=20, max_pending_drafts=2)
+                  min_gap_minutes=20)
 
 
 class _OkPublisher(Publisher):
@@ -216,7 +216,8 @@ def test_due_auto_tick_writes_publishes_and_reschedules(session_factory, config_
         assert post.status == "published" and post.story_id
         assert s.query(StoryUsage).filter_by(status="used").count() == 1
         nxt = get_next_post_at(s, wid)
-        assert timedelta(minutes=47) <= nxt - now <= timedelta(minutes=73)
+        # the next slot at least half a spacing out (slots ~60 min apart, ±6 min nudge)
+        assert timedelta(minutes=23) <= nxt - now <= timedelta(minutes=97)
 
 
 def test_auto_prefers_a_fresh_waiting_draft(session_factory, config_dir):
@@ -236,7 +237,7 @@ def test_auto_prefers_a_fresh_waiting_draft(session_factory, config_dir):
         assert s.query(GeneratedPost).count() == 1  # nothing new written
 
 
-def test_manual_mode_drafts_until_the_review_cap(session_factory, config_dir):
+def test_manual_mode_always_drafts_on_every_mark(session_factory, config_dir):
     now = datetime.now(UTC)
     with session_factory() as s:
         wid = _workspace(s, mode="manual")
@@ -245,9 +246,33 @@ def test_manual_mode_drafts_until_the_review_cap(session_factory, config_dir):
         for _ in range(3):
             _due(s, wid, now)
             actions.append(tick_workspace(s, _ctx(s, wid, config_dir), now=now, tz=UTC).action)
-        assert actions == ["drafted", "drafted", "skipped"]  # max_pending_drafts=2
-        assert s.query(GeneratedPost).filter_by(status="draft").count() == 2
+        assert actions == ["drafted", "drafted", "drafted"]  # no waiting-drafts limit
+        assert s.query(GeneratedPost).filter_by(status="draft").count() == 3
         assert s.query(PostHistory).count() == 0  # manual never publishes
+
+
+def test_auto_mark_drafts_then_publishes_best_fresh_draft(session_factory, config_dir):
+    now = datetime.now(UTC)
+    pub = _OkPublisher()
+    with session_factory() as s:
+        wid = _workspace(s)
+        _seed(s, "Open source AI model ships")
+        best = insert_generated_post(
+            s, niche_slug="tech", post_type="take", text="high priority draft",
+            ai_text_provider="human", platform_account_id=wid, priority_score=9.0,
+        )
+        stale = insert_generated_post(
+            s, niche_slug="tech", post_type="take", text="old but even higher",
+            ai_text_provider="human", platform_account_id=wid, priority_score=99.0,
+        )
+        stale.created_at = (now - timedelta(hours=7)).replace(tzinfo=None)
+        s.commit()
+        _due(s, wid, now)
+        out = tick_workspace(s, _ctx(s, wid, config_dir), now=now, tz=UTC, publisher=pub)
+        assert out.action == "posted" and out.post_id == best.id
+        assert pub.texts == ["high priority draft"]  # stale draft skipped
+        # a new draft was still written at the mark; it waits for a later one
+        assert s.query(GeneratedPost).filter_by(status="draft").count() == 2
 
 
 def test_min_gap_holds_the_post(session_factory, config_dir):
@@ -369,7 +394,7 @@ def test_projection_spans_rest_of_today_then_tomorrow():
     assert tomorrow == [9, 11, 13, 15, 17, 19]
 
 
-def test_schedule_status_reports_paused_review_queue(session_factory, config_dir):
+def test_schedule_status_states(session_factory, config_dir):
     from opensocial.core.autopilot import schedule_status
 
     now = datetime.now(UTC)
@@ -379,9 +404,8 @@ def test_schedule_status_reports_paused_review_queue(session_factory, config_dir
         assert schedule_status(s, ctx, now=now, next_at=now + timedelta(minutes=30))[0] == "ok"
         assert schedule_status(s, ctx, now=now, next_at=None)[0] == "starting"
         assert schedule_status(s, ctx, now=now, next_at=now - timedelta(minutes=30))[0] == "overdue"
-        for i in range(ALL_DAY.max_pending_drafts):
-            insert_generated_post(s, niche_slug="tech", post_type="news", text=f"d{i}", ai_text_provider="template",
-                                  platform_account_id=wid)
+        for i in range(5):  # a full queue no longer pauses anything
+            insert_generated_post(s, niche_slug="tech", post_type="news", text=f"d{i}",
+                                  ai_text_provider="template", platform_account_id=wid)
         s.commit()
-        state, msg = schedule_status(s, ctx, now=now, next_at=now + timedelta(minutes=30))
-        assert state == "paused" and "waiting for review" in msg
+        assert schedule_status(s, ctx, now=now, next_at=now + timedelta(minutes=30))[0] == "ok"

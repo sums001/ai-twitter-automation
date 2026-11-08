@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ChevronRight, Filter, Star } from 'lucide-react';
+import { ChevronRight, Filter } from 'lucide-react';
 import { api, usePoll } from '../api';
 import { NICHE_COLOR, nicheLabel } from '../data';
 import { useApp } from '../AppContext';
-import { Card, Toggle, SectionLabel, EmptyState } from '../components/common';
+import { Card, CardHeader, EmptyState, FilterChip, Tag, Toggle } from '../components/common';
 import NicheEditor from '../components/NicheEditor';
 
 // The Niches page: select the niches you post in, then configure each one
@@ -73,71 +73,35 @@ export default function Niches() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <Card style={{ padding: '16px 18px', display: 'flex', alignItems: 'center', gap: 14 }}>
-        <Star size={18} color="#3ecf8e" />
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 600, fontSize: 14 }}>Selected niches</div>
-          <div className="os-mono" style={{ fontSize: 11, color: '#5b6470', marginTop: 3 }}>
-            only selected niches are fetched, ranked, and drafted for · click a row to configure
-          </div>
+      <Card style={{ padding: '16px 18px' }}>
+        <CardHeader
+          title="Selected niches"
+          sub="only selected niches are fetched, ranked and drafted for · click a row to configure"
+          right={<Tag fg="#3ecf8e" bg="rgba(62,207,142,.14)" style={{ fontSize: 11, padding: '3px 10px' }}>{followed.length} selected</Tag>}
+          style={{ marginBottom: 12 }}
+        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <FilterChip
+            active={supportedOnly}
+            onClick={() => setSupportedOnly((v) => !v)}
+            icon={<Filter size={12} style={{ flexShrink: 0 }} />}
+            title="show only niches that have at least one enabled source"
+          >
+            Supported by sources only
+          </FilterChip>
+          <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>
+            {supportedOnly && !anySupported
+              ? 'no sources enabled yet · showing all'
+              : applySupported && hiddenCount > 0
+                ? `${hiddenCount} niche${hiddenCount > 1 ? 's' : ''} hidden · no enabled source`
+                : `${visibleList.length} niche${visibleList.length === 1 ? '' : 's'}`}
+          </span>
+          <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#7a828f' }}>
+            <span style={{ color: '#f5a524', fontWeight: 700 }}>tip</span> · a few focused niches beat many thin ones
+          </span>
         </div>
-        <div
-          className="os-mono"
-          style={{
-            fontSize: 12, fontWeight: 600, padding: '5px 11px', borderRadius: 999,
-            color: '#3ecf8e', background: 'rgba(62,207,142,.14)',
-          }}
-        >
-          Selected {followed.length}
-        </div>
+        {error && <div className="os-mono" style={{ fontSize: 11, color: '#f5455c', marginTop: 10 }}>{error}</div>}
       </Card>
-
-      <div
-        className="os-mono"
-        style={{
-          fontSize: 11, color: '#9aa3af', lineHeight: 1.6, padding: '11px 14px',
-          background: 'rgba(245,165,36,.07)', border: '1px solid rgba(245,165,36,.22)', borderRadius: 10,
-        }}
-      >
-        <span style={{ color: '#f5a524', fontWeight: 700 }}>Fewer is better.</span>{' '}
-        Selecting a handful of niches you genuinely care about keeps the pipeline
-        focused — sharper sourcing, smarter ranking, and more relevant posts than
-        spreading thin across many.
-      </div>
-
-      {error && (
-        <div className="os-mono" style={{ fontSize: 11, color: '#f5455c' }}>
-          {error}
-        </div>
-      )}
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <button
-          onClick={() => setSupportedOnly((v) => !v)}
-          className={supportedOnly ? '' : 'hover-bright'}
-          title="show only niches that have at least one enabled source"
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontSize: 11.5, fontWeight: 600,
-            fontFamily: 'inherit', padding: '6px 12px', borderRadius: 8,
-            border: `1px solid ${supportedOnly ? 'rgba(62,207,142,.35)' : '#1c212a'}`,
-            background: supportedOnly ? 'rgba(62,207,142,.1)' : '#0d1116',
-            color: supportedOnly ? '#3ecf8e' : '#7a828f',
-          }}
-        >
-          <Filter size={12} style={{ flexShrink: 0 }} />
-          Supported by sources only
-        </button>
-        {supportedOnly && !anySupported && (
-          <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>
-            no sources enabled yet — showing all
-          </span>
-        )}
-        {applySupported && hiddenCount > 0 && (
-          <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>
-            {hiddenCount} niche{hiddenCount > 1 ? 's' : ''} hidden — no enabled source
-          </span>
-        )}
-      </div>
 
       {list.length === 0 ? (
         <EmptyState title="No niches" sub="config/niches/*.json is empty or the service is unreachable" />
@@ -173,14 +137,8 @@ export default function Niches() {
                     <div style={{ fontSize: 13, fontWeight: isOpen ? 700 : 600, color: isOpen ? '#fff' : '#cfd6df' }}>
                       {n.display_name || nicheLabel(n.slug)}
                     </div>
-                    <SectionLabel style={{ marginTop: 2 }}>
-                      {n.slug}
-                      {on ? ' · selected' : ''}
-                    </SectionLabel>
+                    <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>{n.slug}</div>
                   </div>
-                  <span className="os-mono" style={{ fontSize: 9.5, color: on ? '#3ecf8e' : '#5b6470', whiteSpace: 'nowrap' }}>
-                    {on ? 'selected' : 'not selected'}
-                  </span>
                   <span onClick={(e) => e.stopPropagation()} style={{ display: 'inline-flex' }}>
                     <Toggle
                       on={on}
@@ -192,7 +150,7 @@ export default function Niches() {
 
                 {/* inline config editor, right under this row */}
                 {isOpen && (
-                  <div className="lane-open" style={{ padding: '6px 16px 18px', borderTop: '1px solid #161b22' }}>
+                  <div className="lane-open" style={{ padding: '4px 16px 18px 42px' }}>
                     <NicheEditor />
                   </div>
                 )}

@@ -1,15 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, RefreshCw, X } from 'lucide-react';
-import { api, usePoll } from '../api';
+import { usePoll } from '../api';
 import { useApp } from '../AppContext';
-import { ago, hms } from '../utils';
+import { ago } from '../utils';
 import { NICHE_COLOR, nicheLabel } from '../data';
-import { Card, EmptyState, SectionLabel, NicheTag } from '../components/common';
+import { Button, Card, CardHeader, EmptyState, NicheTag, SectionLabel, Segmented, fieldStyle } from '../components/common';
 
-const selectStyle = {
-  colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 8,
-  color: '#e7eaef', fontFamily: 'inherit', fontSize: 12, padding: '7px 10px',
-};
+const selectStyle = { ...fieldStyle, fontFamily: 'inherit', padding: '7px 10px' };
 
 // Niche filter: a styled checkbox dropdown. Options are scoped by the caller
 // (e.g. to the niches that actually use the selected source), so the list only
@@ -333,15 +330,9 @@ function ItemsView() {
           placeholder="Search title…"
           style={{ ...selectStyle, width: 200 }}
         />
-        <button
-          onClick={reload}
-          className="hover-border-text"
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: '1px solid #232932', background: 'transparent', color: '#9aa3af', cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, padding: '7px 12px', borderRadius: 8 }}
-        >
-          <RefreshCw size={12} /> refresh
-        </button>
+        <Button onClick={reload} icon={<RefreshCw size={12} />}>Refresh</Button>
         <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 11, color: '#5b6470' }}>
-          {total === 0 ? '0 items' : `${from}–${to} of ${total}`} · content_items
+          {total === 0 ? '0 items' : `${from}–${to} of ${total}`}
         </span>
       </div>
 
@@ -426,38 +417,6 @@ function StoryRow({ s, rank, open, onToggle }) {
   );
 }
 
-// How long an unused story lives before it's forgotten (global setting).
-function StoryTtl({ hours, onSaved }) {
-  const [value, setValue] = useState(String(hours ?? 24));
-  const [busy, setBusy] = useState(false);
-  useEffect(() => { if (hours != null) setValue(String(hours)); }, [hours]);
-  const n = parseInt(value, 10);
-  const dirty = Number.isFinite(n) && n >= 1 && n <= 720 && n !== hours;
-  const save = () => {
-    if (!dirty || busy) return;
-    setBusy(true);
-    api.patch('/api/settings', { story_ttl_hours: n })
-      .then(onSaved).catch((e) => alert(e.message)).finally(() => setBusy(false));
-  };
-  return (
-    <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-      <span className="os-mono" style={{ fontSize: 10, color: '#7a828f' }}>forget unused stories after</span>
-      <input
-        type="number" min="1" max="720" value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter') save(); }}
-        style={{ ...selectStyle, width: 64, padding: '5px 8px', textAlign: 'center' }}
-      />
-      <span className="os-mono" style={{ fontSize: 10, color: '#7a828f' }}>h</span>
-      {dirty && (
-        <button onClick={save} style={{ border: 'none', cursor: 'pointer', fontSize: 11, fontWeight: 700, padding: '5px 10px', borderRadius: 7, background: '#3ecf8e', color: '#0a0c0f' }}>
-          {busy ? '…' : 'Save'}
-        </button>
-      )}
-    </span>
-  );
-}
-
 function StoriesView() {
   const { withAccount } = useApp();
   const { data, reload } = usePoll(withAccount('/api/stories?limit=40'), 15000);
@@ -467,17 +426,11 @@ function StoriesView() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <span className="os-mono" style={{ fontSize: 11, color: '#7a828f', lineHeight: 1.6 }}>
+        <span className="os-mono" style={{ flex: 1, minWidth: 260, fontSize: 10.5, color: '#7a828f', lineHeight: 1.6 }}>
           Fetched items grouped into stories and ranked for this account, free (no AI). The next post is written from #1,
           or the AI picks among the top few when scores are close.
         </span>
-        <button
-          onClick={reload}
-          className="hover-border-text"
-          style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, border: '1px solid #232932', background: 'transparent', color: '#9aa3af', cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, padding: '7px 12px', borderRadius: 8 }}
-        >
-          <RefreshCw size={12} /> refresh
-        </button>
+        <Button onClick={reload} icon={<RefreshCw size={12} />}>Refresh</Button>
       </div>
 
       {data && !list.length && (
@@ -501,8 +454,8 @@ function StoriesView() {
       )}
 
       {data && data.used.length > 0 && (
-        <Card style={{ padding: '14px 16px' }}>
-          <SectionLabel style={{ marginBottom: 10 }}>ALREADY POSTED BY THIS ACCOUNT</SectionLabel>
+        <Card style={{ padding: '16px 18px' }}>
+          <CardHeader title="Already posted" sub="by this account" />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
             {data.used.map((u) => (
               <div key={u.id} style={{ display: 'flex', gap: 12, alignItems: 'baseline' }}>
@@ -516,10 +469,12 @@ function StoriesView() {
 
       {data && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <span className="os-mono" style={{ fontSize: 10, color: '#4b5563' }}>
+          <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>
             {data.total_stories} stories in the shared knowledge base · niches: {data.niches.map(nicheLabel).join(', ') || 'none followed'}
           </span>
-          <StoryTtl hours={data.story_ttl_hours} onSaved={reload} />
+          <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>
+            unused stories are forgotten after {data.story_ttl_hours}h · change in Settings → Controls
+          </span>
         </div>
       )}
     </div>
@@ -528,40 +483,14 @@ function StoriesView() {
 
 export default function RawData() {
   const [view, setView] = useState('stories');
-  const tab = (k, label) => (
-    <button
-      onClick={() => setView(k)}
-      style={{
-        border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, padding: '7px 14px', borderRadius: 7,
-        background: view === k ? '#1c222b' : 'transparent', color: view === k ? '#e7eaef' : '#7a828f',
-      }}
-    >{label}</button>
-  );
   return (
     <div>
-      <div style={{ display: 'inline-flex', gap: 4, padding: 3, background: '#0d1116', border: '1px solid #1c212a', borderRadius: 9, marginBottom: 16 }}>
-        {tab('stories', 'Stories')}
-        {tab('items', 'Items')}
-      </div>
+      <Segmented options={[['stories', 'Stories'], ['items', 'Items']]} value={view} onChange={setView} style={{ marginBottom: 16 }} />
       {view === 'stories' ? <StoriesView /> : <ItemsView />}
     </div>
   );
 }
 
 function PagerButton({ disabled, onClick, children }) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className={disabled ? '' : 'hover-border-text'}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 5, border: '1px solid #232932',
-        background: 'transparent', color: disabled ? '#3a414c' : '#9aa3af',
-        cursor: disabled ? 'default' : 'pointer', fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 11, padding: '7px 14px', borderRadius: 8, opacity: disabled ? 0.5 : 1,
-      }}
-    >
-      {children}
-    </button>
-  );
+  return <Button onClick={onClick} disabled={disabled}>{children}</Button>;
 }

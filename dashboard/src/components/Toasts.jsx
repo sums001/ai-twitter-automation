@@ -1,7 +1,7 @@
 import React from 'react';
 import { LoaderCircle } from 'lucide-react';
 import { useApp } from '../AppContext';
-import { STATUS_COLORS } from '../data';
+import { STATUS_COLORS, COMMAND_LABELS } from '../data';
 
 // command lifecycle toasts: pending → running → failed (done toasts disappear)
 export default function Toasts() {
@@ -30,7 +30,7 @@ export default function Toasts() {
               </span>
             )}
             <div style={{ flex: 1 }}>
-              <div className="os-mono" style={{ fontSize: 11, fontWeight: 600, color: '#e7eaef' }}>{c.type}</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: '#e7eaef' }}>{COMMAND_LABELS[c.type] || c.type}</div>
               <div className="os-mono" style={{ fontSize: 10, color: err ? '#f5455c' : '#6b7280', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {running ? 'service executing…' : c.status === 'pending' ? 'waiting for worker…' : err || 'see logs'}
               </div>

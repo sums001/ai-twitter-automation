@@ -157,6 +157,13 @@ def resolve_settings(session, workspace_id: str | None = None) -> Settings:
         except (TypeError, ValueError):
             pass
 
+    attempts = get_app_setting(session, "max_post_attempts")
+    if attempts is not None:
+        try:
+            base = replace(base, max_post_attempts=max(1, int(attempts)))
+        except (TypeError, ValueError):
+            pass
+
     if base.secret_key is None:
         from opensocial.core.secrets import keyfile_secret
 
@@ -210,7 +217,16 @@ def load_ai_config(session, workspace_id: str | None = None) -> dict:
 
 
 def _merge_ai(stored: dict) -> dict:
-    return {"text": {**DEFAULT_AI["text"], **(stored.get("text") or {})}}
+    from opensocial.ai.text import canonical_provider
+
+    text = stored.get("text") or {}
+    base = DEFAULT_AI["text"]
+    if canonical_provider(text.get("provider") or base["provider"]) != base["provider"]:
+        # The default model/endpoint belong to the local default; another
+        # provider must not inherit them (a localhost endpoint would override
+        # the provider's own API).
+        base = {"temperature": base["temperature"]}
+    return {"text": {**base, **text}}
 
 
 def save_ai_config(session, config: dict, workspace_id: str | None = None) -> dict:

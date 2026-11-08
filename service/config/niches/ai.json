@@ -54,8 +54,32 @@
     }
   },
   "persona": {
-    "style": "informative",
-    "length": "short"
+    "style": "funny",
+    "length": "short",
+    "instructions": "Write under 280 characters. "
   },
-  "image_source": "unsplash"
+  "image_source": "unsplash",
+  "post_types": {
+    "news": {
+      "enabled": false
+    },
+    "spotlight": {
+      "enabled": true
+    },
+    "insight": {
+      "enabled": true
+    },
+    "take": {
+      "enabled": true
+    },
+    "tip": {
+      "enabled": false
+    },
+    "question": {
+      "enabled": false
+    },
+    "meme": {
+      "enabled": true
+    }
+  }
 }

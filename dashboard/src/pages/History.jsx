@@ -3,59 +3,35 @@ import { Check, X } from 'lucide-react';
 import { usePoll } from '../api';
 import { useApp } from '../AppContext';
 import { hms } from '../utils';
-import { Card, NicheTag, EmptyState } from '../components/common';
+import { Card, NicheTag, EmptyState, Segmented } from '../components/common';
 
 const GRID = { display: 'grid', gridTemplateColumns: '110px 1.1fr 0.9fr 1.1fr 0.8fr 0.6fr 1.7fr', gap: 16 };
 const headStyle = { fontSize: 9, color: '#5b6470', letterSpacing: '.4px' };
 const statusColor = (s) => (s === 'success' ? '#3ecf8e' : s === 'failed' ? '#f5455c' : '#e7eaef');
 
-const RANGES = [['today', 1], ['7d', 7], ['30d', 30]];
-const FILTERS = ['all status', 'success', 'failed', 'with link'];
-
-function Pill({ active, label, onClick }) {
-  return (
-    <span
-      onClick={onClick}
-      style={{
-        padding: '5px 11px', borderRadius: 7, cursor: 'pointer',
-        background: active ? '#1c222b' : 'transparent',
-        color: active ? '#e7eaef' : '#7a828f',
-        border: `1px solid ${active ? '#2a313c' : '#1c212a'}`,
-      }}
-    >
-      {label}
-    </span>
-  );
-}
+const RANGES = [[1, 'Today'], [7, '7 days'], [30, '30 days']];
+const FILTERS = [['all', 'All'], ['success', 'Success'], ['failed', 'Failed'], ['link', 'With link']];
 
 export default function History() {
   const { withAccount } = useApp();
   const [days, setDays] = useState(1);
-  const [filter, setFilter] = useState('all status');
+  const [filter, setFilter] = useState('all');
   const { data } = usePoll(withAccount(`/api/history?days=${days}`), 5000);
 
   const rows = (data || []).filter((h) => {
     if (filter === 'success') return h.status === 'success';
     if (filter === 'failed') return h.status === 'failed';
-    if (filter === 'with link') return h.link;
+    if (filter === 'link') return h.link;
     return true;
   });
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-        <div className="os-mono" style={{ display: 'flex', gap: 6, fontSize: 11 }}>
-          {RANGES.map(([label, d]) => (
-            <Pill key={label} label={label} active={days === d} onClick={() => setDays(d)} />
-          ))}
-        </div>
-        <div className="os-mono" style={{ display: 'flex', gap: 6, fontSize: 11, marginLeft: 4 }}>
-          {FILTERS.map((f) => (
-            <Pill key={f} label={f} active={filter === f} onClick={() => setFilter(f)} />
-          ))}
-        </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+        <Segmented options={RANGES} value={days} onChange={setDays} />
+        <Segmented options={FILTERS} value={filter} onChange={setFilter} />
         <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 11, color: '#5b6470' }}>
-          {rows.length} rows · post_history
+          {rows.length} attempt{rows.length === 1 ? '' : 's'}
         </span>
       </div>
 

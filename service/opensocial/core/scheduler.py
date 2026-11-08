@@ -6,10 +6,9 @@ window, one post roughly every ``every_minutes``, each gap randomized by
 once and stored (``ws:<id>:next_post_at``), so it is stable across worker
 ticks and visible on the dashboard.
 
-Safety limits ride along: ``min_gap_minutes`` (never two posts closer than
-this, even when posting manually) and, in manual mode, ``max_pending_drafts``
-(stop drafting once this many drafts await review, so an idle queue costs no
-tokens). The per-account daily cap lives on the account itself.
+A safety limit rides along: ``min_gap_minutes`` (never two posts closer
+than this, even when posting manually). The per-account daily cap lives on
+the account itself.
 
 Pure functions plus tiny load/save helpers over ``app_settings``.
 """
@@ -30,7 +29,6 @@ class Cadence:
     every_minutes: int = 60
     jitter_pct: int = 20
     min_gap_minutes: int = 20
-    max_pending_drafts: int = 3
 
     def validate(self) -> "Cadence":
         start, end = self.window
@@ -42,8 +40,6 @@ class Cadence:
             raise ValueError("jitter_pct must be between 0 and 50")
         if not 0 <= int(self.min_gap_minutes) <= 24 * 60:
             raise ValueError("min_gap_minutes must be between 0 and 1440")
-        if not 1 <= int(self.max_pending_drafts) <= 50:
-            raise ValueError("max_pending_drafts must be between 1 and 50")
         return self
 
     def to_dict(self) -> dict:
@@ -60,7 +56,6 @@ class Cadence:
             every_minutes=int(data.get("every_minutes", base.every_minutes)),
             jitter_pct=int(data.get("jitter_pct", base.jitter_pct)),
             min_gap_minutes=int(data.get("min_gap_minutes", base.min_gap_minutes)),
-            max_pending_drafts=int(data.get("max_pending_drafts", base.max_pending_drafts)),
         )
 
 

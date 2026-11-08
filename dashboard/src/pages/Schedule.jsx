@@ -4,7 +4,7 @@ import { useApp } from '../AppContext';
 import { NICHE_COLOR } from '../data';
 import { api, usePoll } from '../api';
 import { fmtTime, parseTime, timelinePos } from '../utils';
-import { Card, SectionLabel } from '../components/common';
+import { Button, Card, CardHeader, Loading, SaveButton, SectionLabel, Stat } from '../components/common';
 
 // One account, one rhythm: a daily posting window, "post every X minutes" with
 // random jitter, and safety limits. The service rolls each next post time and
@@ -232,17 +232,19 @@ function Timeline({ sched, cfg, proj, paused }) {
   );
 }
 
+const tile = { background: '#0d1116', border: '1px solid #171c24', borderRadius: 11, padding: '14px 16px' };
+
 function SliderRow({ label, value, display, suffix, hint, min, max, step, onChange }) {
   return (
-    <div style={{ background: '#0d1116', border: '1px solid #171c24', borderRadius: 11, padding: '14px 16px' }}>
+    <div style={{ ...tile, display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 }}>
         <SectionLabel>{label}</SectionLabel>
         <span className="os-mono" style={{ fontSize: 14, fontWeight: 700, color: '#e7eaef' }}>
           {display ?? value}<span style={{ fontSize: 10, color: '#5b6470', fontWeight: 500 }}> {suffix}</span>
         </span>
       </div>
-      <div className="os-mono" style={{ fontSize: 9.5, color: '#4b5563', marginBottom: 10 }}>{hint}</div>
-      <input type="range" className="os-range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(+e.target.value)} />
+      <div className="os-mono" style={{ fontSize: 9.5, color: '#5b6470', marginBottom: 12, lineHeight: 1.5 }}>{hint}</div>
+      <input type="range" className="os-range" style={{ marginTop: 'auto' }} min={min} max={max} step={step} value={value} onChange={(e) => onChange(+e.target.value)} />
     </div>
   );
 }
@@ -282,7 +284,7 @@ export default function Schedule() {
   };
 
   if (!sched || !cfg) {
-    return <Card style={{ padding: 24 }}><div className="os-mono" style={{ fontSize: 11, color: '#5b6470', textAlign: 'center' }}>loading schedule…</div></Card>;
+    return <Card style={{ padding: 24 }}><Loading>loading schedule…</Loading></Card>;
   }
 
   const nowMin = sched.now_minute;
@@ -293,7 +295,7 @@ export default function Schedule() {
   const perDay = Math.max(0, Math.round((cfg.window[1] - cfg.window[0]) / cur.every_minutes));
   const idle = sched.followed_niches.length === 0;
   const status = sched.status || { state: 'ok', message: '' };
-  const blocked = ['paused', 'capped', 'held', 'idle'].includes(status.state);
+  const blocked = status.state === 'idle'; // every mark writes a draft, so only 'no niches' stops it
   const dayWord = (d) => (d === 0 ? 'today' : d === 1 ? 'tomorrow' : `in ${d} days`);
   const proj = projectMarks({ window: cfg.window, every: cur.every_minutes, nowMin });
   // While editing, the headline follows the preview; otherwise the server's rolled
@@ -301,15 +303,15 @@ export default function Schedule() {
   const previewNext = proj.marks.length ? proj.marks[proj.nextIdx] : null;
   const nextMin = dirty ? previewNext : next ? next.minute : null;
   const nextDay = dirty ? (previewNext != null && previewNext <= nowMin ? 1 : 0) : next ? next.day : 0;
-  const nextLabel = `${auto ? 'next post' : 'next draft'}${nextMin != null ? ` · ${dayWord(nextDay)}` : ''}${blocked ? ' · paused' : ''}`;
+  const nextLabel = `${auto ? 'next post' : 'next draft'}${nextMin != null ? ` · ${dayWord(nextDay)}` : ''}`;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {/* ===== summary ===== */}
-      <Card style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: 22, flexWrap: 'wrap' }}>
+      <Card style={{ padding: '16px 18px', display: 'flex', alignItems: 'center', gap: 22, flexWrap: 'wrap' }}>
         <div>
-          <div style={{ fontSize: 15, fontWeight: 700 }}>Posting schedule</div>
-          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 600 }}>Posting schedule</div>
+          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 3 }}>
             now · {fmtTime(nowMin)} · {tzName ? tzName.replace(/_/g, ' ') : 'server-local time'}
           </div>
         </div>
@@ -324,13 +326,13 @@ export default function Schedule() {
       </Card>
 
       {/* ===== timeline ===== */}
-      <Card style={{ padding: '16px 20px' }}>
+      <Card style={{ padding: '16px 18px' }}>
         <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginBottom: 12, lineHeight: 1.6 }}>
           {idle
             ? 'Follow at least one niche on the Niches page to start posting.'
             : auto
-              ? `Autopilot posts about every ${cur.every_minutes} min (±${cur.jitter_pct}%) inside the window. Each post is written from the freshest unused story, fetched ~5 min before.`
-              : `Manual mode: a draft is written about every ${cur.every_minutes} min for you to review, until ${cur.max_pending_drafts} are waiting. Switch on Auto in the top bar to publish unattended.`}
+              ? 'At each mark a new draft is written, then the best fresh draft (highest priority, under 6h old) is published.'
+              : 'At each mark a new draft is written into the Queue for you to review. Turn Autopilot on in the top bar to also publish the best one at each mark.'}
         </div>
         {status.message && status.state !== 'idle' && (
           <div style={{ fontSize: 12, lineHeight: 1.5, color: '#f5a524', background: 'rgba(245,165,36,.08)', border: '1px solid rgba(245,165,36,.25)', borderRadius: 8, padding: '9px 12px', marginBottom: 12 }}>
@@ -338,64 +340,55 @@ export default function Schedule() {
           </div>
         )}
         <Timeline sched={sched} cfg={cfg} proj={proj} paused={blocked} />
-        {dirty && (
-          <div className="os-mono" style={{ fontSize: 10, color: '#f5a524', marginTop: 8 }}>
-            preview of unsaved changes · save to apply
-          </div>
-        )}
       </Card>
 
-      {/* ===== cadence editor ===== */}
-      <Card style={{ padding: '16px 20px' }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-          <div style={{ flex: '1.4 1 320px', background: '#0d1116', border: '1px solid #171c24', borderRadius: 11, padding: '14px 16px' }}>
-            <SectionLabel style={{ marginBottom: 3 }}>POSTING WINDOW</SectionLabel>
-            <div className="os-mono" style={{ fontSize: 9.5, color: '#4b5563', marginBottom: 14 }}>posts only go out between these times</div>
-            <TimeRangeSlider
-              lo={cfg.window[0]} hi={cfg.window[1]}
-              onChange={(lo, hi) => patch({ window: [fmtTime(lo), fmtTime(Math.min(hi, 1439))] })}
-            />
+      {/* ===== cadence editor: window on top, the three knobs below ===== */}
+      <Card style={{ padding: '16px 18px' }}>
+        <CardHeader
+          title="Rhythm"
+          sub={cap ? `daily cap ${cap} posts · set in Settings → Controls` : 'no daily cap · set one in Settings → Controls'}
+          right={dirty && <span className="os-mono" style={{ fontSize: 10, color: '#f5a524' }}>unsaved · the timeline shows a preview</span>}
+        />
+        <div style={{ ...tile, marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 14 }}>
+            <SectionLabel>Posting window</SectionLabel>
+            <span className="os-mono" style={{ fontSize: 9.5, color: '#5b6470' }}>posts only go out between these times</span>
           </div>
-          <div style={{ flex: '1 1 260px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <SliderRow
-              label="POST EVERY" value={cur.every_minutes} suffix="min" min={15} max={240} step={5}
-              hint={`≈ ${perDay} post${perDay === 1 ? '' : 's'} across a ${Math.round(winLen * 10) / 10}h window`}
-              onChange={(v) => patch({ every_minutes: v })}
-            />
-            <SliderRow
-              label="RANDOMNESS" value={cur.jitter_pct} display={`±${cur.jitter_pct}`} suffix="%" min={0} max={50} step={5}
-              hint="each gap varies by this much, so timing never looks robotic"
-              onChange={(v) => patch({ jitter_pct: v })}
-            />
-          </div>
-          <div style={{ flex: '1 1 260px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <SliderRow
-              label="MINIMUM GAP" value={cur.min_gap_minutes} suffix="min" min={0} max={120} step={5}
-              hint="safety: never two posts closer than this"
-              onChange={(v) => patch({ min_gap_minutes: v })}
-            />
-            <SliderRow
-              label="DRAFTS TO REVIEW" value={cur.max_pending_drafts} suffix="max" min={1} max={10} step={1}
-              hint="manual mode stops writing at this many waiting (saves tokens)"
-              onChange={(v) => patch({ max_pending_drafts: v })}
-            />
-          </div>
+          <TimeRangeSlider
+            lo={cfg.window[0]} hi={cfg.window[1]}
+            onChange={(lo, hi) => patch({ window: [fmtTime(lo), fmtTime(Math.min(hi, 1439))] })}
+          />
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
-          <span className="os-mono" style={{ fontSize: 9.5, color: '#4b5563', flex: 1, lineHeight: 1.5 }}>
-            {cap ? `Daily cap: ${cap} posts (set per account in Settings).` : 'No daily cap set.'} Saving re-rolls the next post time.
+        <div className="os-grid-3">
+          <SliderRow
+            label="Post every" value={cur.every_minutes} suffix="min" min={15} max={240} step={5}
+            hint={`≈ ${perDay} post${perDay === 1 ? '' : 's'} across a ${Math.round(winLen * 10) / 10}h window`}
+            onChange={(v) => patch({ every_minutes: v })}
+          />
+          <SliderRow
+            label="Randomness" value={cur.jitter_pct} display={`±${cur.jitter_pct}`} suffix="%" min={0} max={50} step={5}
+            hint="each gap varies by this much, so timing never looks robotic"
+            onChange={(v) => patch({ jitter_pct: v })}
+          />
+          <SliderRow
+            label="Minimum gap" value={cur.min_gap_minutes} suffix="min" min={0} max={120} step={5}
+            hint="safety: never two posts closer than this"
+            onChange={(v) => patch({ min_gap_minutes: v })}
+          />
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 14 }}>
+          <span className="os-mono" style={{ fontSize: 9.5, color: '#5b6470', flex: 1, lineHeight: 1.5 }}>
+            Saving re-rolls the next post time.
           </span>
-          <button onClick={() => setEdit(null)} disabled={!dirty} className="hover-border-text" style={{ border: '1px solid #232932', background: 'transparent', color: dirty ? '#9aa3af' : '#41474f', cursor: dirty ? 'pointer' : 'default', fontSize: 12, fontWeight: 600, padding: '8px 16px', borderRadius: 8 }}>Reset</button>
-          <button onClick={save} className="run-btn" style={{ border: 'none', cursor: dirty ? 'pointer' : 'default', fontSize: 12, fontWeight: 700, padding: '8px 20px', borderRadius: 8, background: dirty ? '#3ecf8e' : '#1c222b', color: dirty ? '#0a0c0f' : '#7a828f' }}>
-            {saving ? 'Saving…' : dirty ? 'Save changes' : 'Saved'}
-          </button>
+          <Button onClick={() => setEdit(null)} disabled={!dirty}>Discard</Button>
+          <SaveButton dirty={dirty} saving={saving} onClick={save} />
         </div>
       </Card>
 
       {/* ===== today's posts ===== */}
       {sched.posted_today.length > 0 && (
-        <Card style={{ padding: '16px 20px' }}>
-          <SectionLabel style={{ marginBottom: 10 }}>POSTED TODAY</SectionLabel>
+        <Card style={{ padding: '16px 18px' }}>
+          <CardHeader title="Posted today" sub={`${sched.posted_today.length} post${sched.posted_today.length === 1 ? '' : 's'}`} />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {sched.posted_today.slice().reverse().map((p) => (
               <div key={p.post_id} style={{ display: 'flex', gap: 12, alignItems: 'baseline' }}>
@@ -407,15 +400,6 @@ export default function Schedule() {
           </div>
         </Card>
       )}
-    </div>
-  );
-}
-
-function Stat({ value, label, color }) {
-  return (
-    <div>
-      <div className="os-mono" style={{ fontSize: 20, fontWeight: 700, color, lineHeight: 1 }}>{value}</div>
-      <div className="os-mono" style={{ fontSize: 9, color: '#5b6470', marginTop: 4 }}>{label}</div>
     </div>
   );
 }

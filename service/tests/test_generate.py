@@ -385,3 +385,24 @@ def test_factsheet_prefers_specific_sentences():
                             entities={"nvidia", "rubin"}, budget=160)
     assert "3x faster" in facts
     assert "weather" not in facts
+
+
+def test_polish_flags_stock_ai_poster_moves_for_a_rewrite():
+    for text in (
+        "I'm firmly in the flash is overrated camp.",
+        "Security bugs are absurd. Half of cybersecurity is spellcheck with consequences.",
+        "This is a much bigger deal than most people realize.",
+    ):
+        _, leftovers, _ = polish(text, 280)
+        assert leftovers, text
+    _, leftovers, _ = polish("Kent Overstreet says the next bcachefs release will be all Rust.", 280)
+    assert leftovers == []
+
+
+def test_write_prompt_requires_context_and_no_punchline():
+    from opensocial.ai.prompts import build_messages
+
+    system, _ = build_messages(config={"slug": "tech"}, post_type="take", subject="X")
+    assert "has not seen any article" in system
+    assert "No closing punchline" in system
+    assert "say what happened" in system  # every shape starts from the news

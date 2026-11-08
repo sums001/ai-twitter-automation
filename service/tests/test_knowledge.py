@@ -317,3 +317,8 @@ def test_story_ttl_is_adjustable_and_bounds_the_shortlist(session_factory):
         assert prune(s, now=NOW).stories == 0  # still inside 48h
         with pytest.raises(ValueError):
             set_story_ttl_hours(s, 0)
+
+
+def test_forum_threads_are_less_postable():
+    assert postability("Ask HN: Would banning LLM reverse engineering help OSS?", set()) < \
+        postability("Hugging Face fixes admin API bypass", set())

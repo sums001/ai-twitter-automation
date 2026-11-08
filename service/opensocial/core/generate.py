@@ -132,6 +132,11 @@ _CLICHE_WORDS = (
     "tapestry", "testament to", "paradigm", "realm", "ever-evolving",
     "landscape", "navigate the", "it's not just", "here's why", "here's the thing",
     "the real question is", "underscores", "a new era",
+    # stock "AI poster" moves: formula openers and bolted-on punchlines
+    "firmly in the", "than most people realize", "massively underestimate",
+    "nobody is talking about", "let that sink in", "plot twist", "buckle up",
+    "my practical takeaway", "that's the kind of", "cosplay", "with consequences",
+    "like a dare", "turns out", "at this point, ",
 )
 
 
