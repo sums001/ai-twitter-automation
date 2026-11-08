@@ -8,18 +8,6 @@
     "length": "medium",
     "instructions": "Write under 280 characters. Write like opinion or take for ragebait but don't give miss-information. The post shouldn't sound like promotion and should be easy to read. try splitting it into multiple lines small lines."
   },
-  "ai": {
-    "text": {
-      "provider": "litellm",
-      "model": "ollama/llama3",
-      "temperature": 0.8
-    },
-    "image": {
-      "provider": "pollinations",
-      "width": 1024,
-      "height": 1024
-    }
-  },
   "filters": {
     "blocklist": [
       "nsfw",
@@ -48,13 +36,6 @@
     "dup_threshold": 0.8,
     "dup_window_days": 3
   },
-  "prioritization": {
-    "recency_weight": 0.4,
-    "engagement_weight": 1,
-    "relevance_weight": 0.95,
-    "sentiment_weight": 0.15,
-    "half_life_hours": 24
-  },
   "post_types": {
     "news": {
       "enabled": true
@@ -78,21 +59,8 @@
       "enabled": false
     }
   },
-  "independent_take": {
-    "enabled": false,
-    "per_day": 1,
-    "types": [
-      "take"
-    ],
-    "image": "ai"
-  },
   "posting": {
     "include_source_link": false
-  },
-  "approval": {
-    "required": false,
-    "timeout_minutes": 120,
-    "on_timeout": "discard"
   },
   "sources": {
     "hackernews": {
@@ -103,14 +71,6 @@
       "tag": "technology",
       "limit": 15,
       "full_text": false
-    },
-    "github_releases": {
-      "repos": [
-        "python/cpython",
-        "openai/openai-python",
-        "langchain-ai/langchain"
-      ],
-      "limit": 5
     },
     "arxiv": {
       "query": "cat:cs.AI OR cat:cs.LG",
@@ -124,10 +84,6 @@
       ],
       "enabled": false
     },
-    "producthunt": {
-      "enabled": true,
-      "limit": 20
-    },
     "youtube": {
       "enabled": false,
       "query": "ai news",
@@ -138,22 +94,10 @@
       "category": "tech",
       "feeds": [
         "https://techcrunch.com/feed/",
-        "https://feeds.arstechnica.com/arstechnica/index"
+        "https://feeds.arstechnica.com/arstechnica/index",
+        "https://futurism.com/feed"
       ]
     }
   },
-  "image_source": "unsplash",
-  "schedule": {
-    "windows": [
-      [
-        "09:00",
-        "21:00"
-      ]
-    ],
-    "posts_per_day": [
-      6,
-      6
-    ],
-    "min_gap_minutes": 20
-  }
+  "image_source": "unsplash"
 }

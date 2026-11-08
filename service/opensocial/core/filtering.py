@@ -1,19 +1,17 @@
-"""Phase 2 — filtering, near-duplicate detection, and prioritization.
+"""Niche tagging: which niches an item belongs to, and how relevant it is.
 
 Each niche applies three cheap filters to the content linked to it:
 
-* **blocklist**  — drop items whose text contains any blocked keyword
-* **relevance**  — keep only items matching enough relevance keywords
+* **blocklist**  — drop items containing a blocked keyword (whole words)
+* **relevance**  — keep items matching enough relevance keywords; a headline
+  hit counts three times a body hit
 * **age limit**  — drop items older than ``max_age_days``
 
-Surviving items are then checked for **near-duplicates** against the other
-items already accepted for the niche (same story reprinted by several
-outlets), and each link in ``content_item_niches`` is marked ``candidate``,
-``filtered``, or ``duplicate``.
-
-Finally, candidates are ordered into a queue by a weighted blend of recency,
-relevance, and how well their sentiment matches the niche's target — the
-ordered hand-off to Phase 3 (post generation).
+Surviving items are checked for **near-duplicates** (same story reprinted by
+several outlets) and each ``content_item_niches`` link is marked ``candidate``,
+``filtered`` or ``duplicate``. Candidates *and* duplicates then flow into the
+knowledge base (``core/knowledge.py``), which groups them into stories and
+ranks them; duplicates count as extra coverage there.
 """
 
 from __future__ import annotations
@@ -65,35 +63,6 @@ class FilterConfig:
         )
 
 
-@dataclass
-class PriorityConfig:
-    """Weights for ordering candidates, parsed from the niche's ``prioritization``.
-
-    Engagement was removed from the blend: most sources return no engagement
-    metrics (so the signal is usually 0), and where it exists it distorts
-    cross-source — an upvoted Reddit item would always outrank a metric-less
-    paper in the same niche. Any legacy ``engagement_weight`` key is ignored.
-    """
-
-    recency_weight: float = 0.5
-    relevance_weight: float = 0.3
-    sentiment_weight: float = 0.2
-    half_life_hours: float = 24.0  # recency score halves every this many hours
-    sentiment_target: float | None = None  # -1..1; None disables sentiment matching
-
-    @classmethod
-    def from_niche(cls, raw: dict) -> "PriorityConfig":
-        p = (raw or {}).get("prioritization") or {}
-        target = p.get("sentiment_target")
-        return cls(
-            recency_weight=float(p.get("recency_weight", 0.5)),
-            relevance_weight=float(p.get("relevance_weight", 0.3)),
-            sentiment_weight=float(p.get("sentiment_weight", 0.2)),
-            half_life_hours=float(p.get("half_life_hours", 24.0)),
-            sentiment_target=float(target) if target is not None else None,
-        )
-
-
 # ---------------------------------------------------------------------------
 # Text helpers
 # ---------------------------------------------------------------------------
@@ -127,8 +96,51 @@ def _as_utc(dt: datetime | None) -> datetime | None:
 # ---------------------------------------------------------------------------
 
 
-def _relevance_hits(text: str, keywords: list[str]) -> int:
-    return sum(1 for kw in keywords if kw in text)
+_KEYWORD_RE_CACHE: dict[str, re.Pattern] = {}
+
+# A keyword hit in the headline is worth this many hits in the body: the title
+# is what the story is *about*, the body mentions plenty in passing.
+TITLE_WEIGHT = 3
+# Weighted hits at which relevance saturates to 1.0 (two title hits).
+_RELEVANCE_SATURATION = 2 * TITLE_WEIGHT
+
+
+def _keyword_re(keyword: str) -> re.Pattern:
+    """Whole-word matcher for a keyword or phrase, allowing a plural ``s``.
+
+    Substring matching made ``ai`` match "said" and ``ml`` match "html"; word
+    boundaries fix that while still matching "AIs" / "chips" for "ai" / "chip".
+    """
+    pat = _KEYWORD_RE_CACHE.get(keyword)
+    if pat is None:
+        pat = re.compile(
+            rf"(?<![a-z0-9]){re.escape(keyword)}(?:e?s)?(?![a-z0-9])"
+        )
+        _KEYWORD_RE_CACHE[keyword] = pat
+    return pat
+
+
+def keyword_in(text: str, keyword: str) -> bool:
+    """Whether ``keyword`` appears in lower-cased ``text`` as a whole word."""
+    return bool(_keyword_re(keyword).search(text))
+
+
+def _relevance_hits(title: str, rest: str, keywords: list[str]) -> tuple[int, int]:
+    """Return ``(distinct_hits, weighted_hits)`` for whole-word keyword matches.
+
+    ``distinct_hits`` counts keywords found anywhere (what the threshold is
+    checked against); ``weighted_hits`` counts a title hit ``TITLE_WEIGHT``
+    times so headline matches dominate the relevance score.
+    """
+    distinct = weighted = 0
+    for kw in keywords:
+        if keyword_in(title, kw):
+            distinct += 1
+            weighted += TITLE_WEIGHT
+        elif keyword_in(rest, kw):
+            distinct += 1
+            weighted += 1
+    return distinct, weighted
 
 
 def _evaluate(row: ContentItemRow, cfg: FilterConfig, now: datetime) -> tuple[str, float]:
@@ -140,7 +152,7 @@ def _evaluate(row: ContentItemRow, cfg: FilterConfig, now: datetime) -> tuple[st
     text = _item_text(row)
 
     for blocked in cfg.blocklist:
-        if blocked in text:
+        if keyword_in(text, blocked):
             return "filtered", 0.0
 
     if cfg.max_age_days is not None:
@@ -150,12 +162,12 @@ def _evaluate(row: ContentItemRow, cfg: FilterConfig, now: datetime) -> tuple[st
             if age_days > cfg.max_age_days:
                 return "filtered", 0.0
 
-    hits = _relevance_hits(text, cfg.relevance_keywords)
     if cfg.relevance_keywords:
+        title = (row.title or "").lower()
+        hits, weighted = _relevance_hits(title, text, cfg.relevance_keywords)
         if hits < cfg.relevance_threshold:
             return "filtered", 0.0
-        # normalize score against the number of keywords actually configured
-        relevance = hits / len(cfg.relevance_keywords)
+        relevance = min(1.0, weighted / _RELEVANCE_SATURATION)
     else:
         relevance = 1.0  # no relevance keywords configured → everything is relevant
 
@@ -208,87 +220,10 @@ def filter_niche(session: Session, niche_slug: str, raw_config: dict) -> dict[st
                 recent.append((published, tokens))
 
         link.status = status
-        link.relevance_score = relevance if status == "candidate" else 0.0
+        # Duplicates keep their relevance: the knowledge base folds them into
+        # the same story as extra coverage rather than discarding them.
+        link.relevance_score = relevance if status != "filtered" else 0.0
         counts[status] += 1
 
     session.commit()
     return counts
-
-
-# ---------------------------------------------------------------------------
-# Prioritization
-# ---------------------------------------------------------------------------
-
-
-def _recency_score(published: datetime | None, now: datetime, half_life_hours: float) -> float:
-    published = _as_utc(published)
-    if published is None:
-        return 0.0
-    age_hours = max(0.0, (now - published).total_seconds() / 3600.0)
-    return 0.5 ** (age_hours / half_life_hours)
-
-
-def _sentiment_score(sentiment: float | None, target: float | None) -> float:
-    if target is None:
-        return 0.0  # disabled — contributes nothing (weight effectively dropped below)
-    value = 0.0 if sentiment is None else sentiment
-    return 1.0 - abs(value - target) / 2.0  # sentiment range is -1..1
-
-
-@dataclass
-class RankedCandidate:
-    row: ContentItemRow
-    relevance_score: float
-    priority_score: float
-
-
-def candidate_queue(
-    session: Session, niche_slug: str, raw_config: dict
-) -> list[RankedCandidate]:
-    """Return the niche's ``candidate`` items ordered best-first.
-
-    Score blends recency, relevance, and sentiment match (per
-    :class:`PriorityConfig`). Relevance reuses the keyword-hit score already
-    computed during filtering (stored on the niche link). Engagement is
-    deliberately not a factor — see :class:`PriorityConfig`.
-    """
-    cfg = PriorityConfig.from_niche(raw_config)
-    now = datetime.now(timezone.utc)
-
-    rows = session.execute(
-        select(ContentItemNiche, ContentItemRow)
-        .join(ContentItemRow, ContentItemNiche.content_item_id == ContentItemRow.id)
-        .where(
-            ContentItemNiche.niche_slug == niche_slug,
-            ContentItemNiche.status == "candidate",
-        )
-    ).all()
-    if not rows:
-        return []
-
-    # If sentiment matching is disabled, redistribute its weight to the others.
-    w_rec = cfg.recency_weight
-    w_rel = cfg.relevance_weight
-    w_sent = 0.0 if cfg.sentiment_target is None else cfg.sentiment_weight
-    total_w = w_rec + w_rel + w_sent
-    if total_w <= 0:
-        w_rec, total_w = 1.0, 1.0
-
-    ranked: list[RankedCandidate] = []
-    for link, row in rows:
-        recency = _recency_score(row.published_at, now, cfg.half_life_hours)
-        relevance = link.relevance_score or 0.0
-        sentiment = _sentiment_score(row.sentiment, cfg.sentiment_target)
-        priority = (
-            w_rec * recency + w_rel * relevance + w_sent * sentiment
-        ) / total_w
-        ranked.append(
-            RankedCandidate(
-                row=row,
-                relevance_score=relevance,
-                priority_score=round(priority, 4),
-            )
-        )
-
-    ranked.sort(key=lambda c: c.priority_score, reverse=True)
-    return ranked

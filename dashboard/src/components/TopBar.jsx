@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Zap, Download, Sparkles, Play, ChevronDown } from 'lucide-react';
 import { ROUTE_TITLES, QUICK_ACTIONS } from '../data';
 import { useApp } from '../AppContext';
+import HowItWorksButton from './HowItWorks';
 
 export function SafetyRibbon() {
   const { dryRun } = useApp();
@@ -83,6 +84,33 @@ function QuickActions() {
   );
 }
 
+function ToggleSwitch({ label, on, onToggle, color, title }) {
+  const accent = `rgb(${color})`;
+  return (
+    <button
+      onClick={onToggle}
+      className="hover-bright"
+      title={title}
+      role="switch"
+      aria-checked={on}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+        padding: '5px 11px', borderRadius: 8,
+        border: `1px solid ${on ? `rgba(${color},.4)` : '#2a313c'}`,
+        background: on ? `rgba(${color},.1)` : '#141922',
+      }}
+    >
+      <span className="os-mono" style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.4px', color: '#9aa3af' }}>{label}</span>
+      <span style={{ position: 'relative', width: 30, height: 17, borderRadius: 999, flexShrink: 0, transition: 'background .15s', background: on ? accent : '#2a313c' }}>
+        <span style={{ position: 'absolute', top: 2.5, left: on ? 15 : 2.5, width: 12, height: 12, borderRadius: '50%', background: '#0a0c0f', transition: 'left .15s' }} />
+      </span>
+      <span className="os-mono" style={{ fontSize: 10, fontWeight: 700, minWidth: 20, color: on ? accent : '#7a828f' }}>
+        {on ? 'ON' : 'OFF'}
+      </span>
+    </button>
+  );
+}
+
 export default function TopBar() {
   const { route, dryRun, toggleDry, autopilot, toggleAutopilot } = useApp();
   const [title, sub] = ROUTE_TITLES[route] || ['', ''];
@@ -93,44 +121,23 @@ export default function TopBar() {
         <div style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-.2px' }}>{title}</div>
         <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 1 }}>{sub}</div>
       </div>
+      <HowItWorksButton route={route} />
 
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
-        {/* dry-run / live chip */}
-        <button
-          onClick={toggleDry}
-          className="hover-bright"
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontSize: 11,
-            fontWeight: 700, padding: '6px 11px', borderRadius: 8,
-            border: `1px solid ${dryRun ? 'rgba(245,165,36,.4)' : 'rgba(62,207,142,.4)'}`,
-            background: dryRun ? 'rgba(245,165,36,.13)' : 'rgba(62,207,142,.13)',
-            color: dryRun ? '#f5a524' : '#3ecf8e',
-          }}
-        >
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor' }} />
-          <span className="os-mono">{dryRun ? 'DRY-RUN' : 'LIVE'}</span>
-        </button>
-
-        {/* autopilot switch */}
-        <button
-          onClick={toggleAutopilot}
-          className="hover-bright"
-          title="When on, the service runs due slots unattended (APP_MODE=auto)"
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer',
-            padding: '5px 11px', borderRadius: 8,
-            border: `1px solid ${autopilot ? 'rgba(62,207,142,.4)' : '#2a313c'}`,
-            background: autopilot ? 'rgba(62,207,142,.1)' : '#141922',
-          }}
-        >
-          <span className="os-mono" style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.4px', color: '#9aa3af' }}>AUTOPILOT</span>
-          <span style={{ position: 'relative', width: 30, height: 17, borderRadius: 999, flexShrink: 0, transition: 'background .15s', background: autopilot ? '#3ecf8e' : '#2a313c' }}>
-            <span style={{ position: 'absolute', top: 2.5, left: autopilot ? 15 : 2.5, width: 12, height: 12, borderRadius: '50%', background: '#0a0c0f', transition: 'left .15s' }} />
-          </span>
-          <span className="os-mono" style={{ fontSize: 10, fontWeight: 700, color: autopilot ? '#3ecf8e' : '#7a828f' }}>
-            {autopilot ? 'ON' : 'OFF'}
-          </span>
-        </button>
+        <ToggleSwitch
+          label="DRY-RUN"
+          on={dryRun}
+          onToggle={toggleDry}
+          color="245,165,36"
+          title="When on, publish actions are simulated and nothing is posted to X. Turn off to go live."
+        />
+        <ToggleSwitch
+          label="AUTOPILOT"
+          on={autopilot}
+          onToggle={toggleAutopilot}
+          color="62,207,142"
+          title="Every posting mark writes a draft. When on, the best fresh draft is also published at each mark."
+        />
 
         <QuickActions />
       </div>

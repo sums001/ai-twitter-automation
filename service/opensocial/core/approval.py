@@ -89,47 +89,20 @@ def regenerate(
     post: GeneratedPost,
     config: dict,
     *,
+    voice_samples: list[str] | None = None,
     text_provider=None,
     image_provider=None,
 ) -> GeneratedPost:
-    """Re-run AI generation for this draft's subject, in place.
+    """Rewrite this draft from the same story in a new tone, in place.
 
-    Reuses the source item's title (or the independent topic) as the subject and
-    keeps the post a publishable ``draft``.
+    Keeps the post a publishable ``draft`` (unless it was already terminal).
     """
-    from opensocial.ai.images import get_image_provider
-    from opensocial.ai.text import get_text_provider
-    from opensocial.core.db import ContentItemRow
-    from opensocial.core.generate import DEFAULT_CHAR_LIMIT, _attach_image, _finalize_text
+    from opensocial.core.generate import regenerate_text
 
-    text_provider = text_provider or get_text_provider(config)
-    image_provider = image_provider or get_image_provider(config)
-    niche_name = config.get("display_name") or post.niche_slug
-    char_limit = int(config.get("char_limit", DEFAULT_CHAR_LIMIT))
-
-    subject = f"an original {post.post_type} about {niche_name}"
-    body = ""
-    item_media = None
-    if post.content_item_id:
-        item = session.get(ContentItemRow, post.content_item_id)
-        if item is not None:
-            subject = item.title
-            body = (item.summary or item.body or "")[:1500]
-            item_media = item.media_urls
-
-    post.text = _finalize_text(
-        text_provider, config=config, post_type=post.post_type,
-        subject=subject, body=body, char_limit=char_limit,
+    regenerate_text(
+        session, post, config, voice_samples=voice_samples,
+        text_provider=text_provider, image_provider=image_provider,
     )
-    media_url, attribution, img_provider = _attach_image(
-        image_provider, niche_name=niche_name,
-        subject=subject, item_media=item_media,
-        text_provider=text_provider, body=body,
-    )
-    post.media_url = media_url
-    post.media_attribution = attribution
-    post.ai_image_provider = img_provider
-    post.ai_text_provider = text_provider.name
     if post.status not in ("published", "rejected"):
         post.status = "draft"
     _touch(post)

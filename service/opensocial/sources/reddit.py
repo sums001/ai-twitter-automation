@@ -39,7 +39,7 @@ import feedparser
 import httpx
 
 from opensocial.core.models import ContentItem
-from opensocial.sources.base import DEFAULT_TIMEOUT, Source, register
+from opensocial.sources.base import DEFAULT_TIMEOUT, Setting, Source, register
 from opensocial.sources.rss import struct_to_dt
 
 _SORTS = {"hot", "new", "top", "rising"}
@@ -71,6 +71,40 @@ def _retry_after(resp: httpx.Response) -> float | None:
 class RedditSource(Source):
     name = "reddit"
     category = "social"
+    trust = 0.4
+    label = "Reddit"
+    description = (
+        "Hot / new / top posts from the subreddits you add, via public RSS feeds "
+        "(title and post text, no vote counts). Heavily rate-limited from server IPs."
+    )
+    settings = (
+        Setting("subreddits", "Subreddit names.", []),
+        Setting("sort", "hot | new | top | rising.", "hot"),
+        Setting("limit", "Max posts per subreddit.", 25),
+        Setting("time", "Window for sort=top: hour | day | week | month | year | all.", "day"),
+        Setting("request_delay", "Seconds between subreddits.", 1.5),
+        Setting("retries", "Retries per host on 429 / 5xx.", 2),
+        Setting("backoff", "Base seconds for exponential backoff.", 2.0),
+        Setting("max_wait", "Skip a subreddit if asked to wait longer than this.", 30),
+    )
+    origin_key = "subreddits"
+    origin_label = "subreddit URL or name"
+    origin_defaults = (("sort", "hot"), ("limit", 25))
+    max_origins = 10
+
+    @classmethod
+    def parse_origin(cls, value: str) -> str | None:
+        """Extract a subreddit name from a URL, an ``r/name``, or a bare name."""
+        s = value.strip().rstrip("/")
+        m = re.search(r"reddit\.com/r/([A-Za-z0-9_]+)", s, re.I)
+        if m:
+            return m.group(1)
+        m = re.fullmatch(r"(?:r/)?([A-Za-z0-9_]+)", s)
+        return m.group(1) if m else None
+
+    @classmethod
+    def origin_display(cls, value: str) -> str:
+        return f"r/{value}"
 
     async def fetch(self) -> list[ContentItem]:
         subreddits: list[str] = self.config.get("subreddits", []) or []

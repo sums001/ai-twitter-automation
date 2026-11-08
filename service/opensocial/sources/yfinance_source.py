@@ -15,13 +15,23 @@ import asyncio
 from datetime import datetime, timezone
 
 from opensocial.core.models import ContentItem
-from opensocial.sources.base import Source, parse_iso8601, register
+from opensocial.sources.base import Setting, Source, parse_iso8601, register
 
 
 @register
 class YFinanceSource(Source):
     name = "yfinance"
     category = "finance"
+    trust = 0.6
+    label = "Yahoo Finance"
+    description = (
+        "Yahoo Finance news for the ticker symbols you list. Uses the unofficial "
+        "yfinance library, so it can break if Yahoo changes its site."
+    )
+    settings = (
+        Setting("symbols", "Ticker symbols, e.g. AAPL, BTC-USD.", []),
+        Setting("limit", "Max news items per symbol.", 10),
+    )
 
     async def fetch(self) -> list[ContentItem]:
         symbols: list[str] = self.config.get("symbols", []) or []

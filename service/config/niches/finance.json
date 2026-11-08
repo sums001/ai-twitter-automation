@@ -30,13 +30,6 @@
     "dup_threshold": 0.8,
     "dup_window_days": 2
   },
-  "prioritization": {
-    "recency_weight": 0.5,
-    "engagement_weight": 0.2,
-    "relevance_weight": 0.2,
-    "sentiment_weight": 0.1,
-    "half_life_hours": 12
-  },
   "sources": {
     "yfinance": {
       "symbols": [
@@ -47,5 +40,9 @@
       ],
       "limit": 10
     }
+  },
+  "persona": {
+    "style": "casual",
+    "length": "short"
   }
 }

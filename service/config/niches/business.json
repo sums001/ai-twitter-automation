@@ -30,17 +30,19 @@
     "dup_threshold": 0.8,
     "dup_window_days": 5
   },
-  "prioritization": {
-    "recency_weight": 0.4,
-    "engagement_weight": 0.3,
-    "relevance_weight": 0.15,
-    "sentiment_weight": 0.15,
-    "half_life_hours": 36
-  },
   "sources": {
-    "producthunt": {
-      "enabled": true,
-      "limit": 20
+    "googlenews": {
+      "query": "business",
+      "limit": 30
+    },
+    "rss": {
+      "category": "business",
+      "feeds": [
+        "http://feeds.harvardbusiness.org/harvardbusiness/",
+        "https://www.fastcompany.com/latest/rss",
+        "https://fortune.com/feed/",
+        "https://www.entrepreneur.com/latest.rss"
+      ]
     }
   }
 }

@@ -14,7 +14,9 @@ import httpx
 from opensocial.core.models import ContentItem
 from opensocial.sources.base import (
     DEFAULT_TIMEOUT,
+    AUTH_REQUIRED,
     USER_AGENT,
+    Setting,
     Source,
     parse_iso8601,
     register,
@@ -28,6 +30,17 @@ API_URL = "https://content.guardianapis.com/search"
 class GuardianSource(Source):
     name = "guardian"
     category = "news"
+    trust = 0.9
+    label = "The Guardian"
+    description = "Newest Guardian articles by search or section, with full article text."
+    auth = AUTH_REQUIRED
+    key_envs = ("GUARDIAN_API_KEY",)
+    key_help = "A free developer key from open-platform.theguardian.com (about 500 calls/day)."
+    settings = (
+        Setting("query", "Free-text search.", ""),
+        Setting("section", "Section filter, e.g. technology, politics.", ""),
+        Setting("limit", "Max items per fetch.", 20),
+    )
 
     async def fetch(self) -> list[ContentItem]:
         key = resolve_api_key(self.config, "GUARDIAN_API_KEY", source_name=self.name)

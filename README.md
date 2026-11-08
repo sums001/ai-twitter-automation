@@ -51,16 +51,15 @@ Each topic pulls from a mix of trusted places on the web. Across all topics, Ope
 * **Reddit**, for popular community posts
 * **YouTube**, for videos and their transcripts
 * **Hacker News**, for technology and startup discussion
-* **Medium** and other **blogs and news sites** (such as TechCrunch, Ars Technica, Reuters, MarketWatch, CoinDesk, Decrypt, The Block, Harvard Business Review, Indie Hackers, the Y Combinator blog, Nature, PhysOrg, Futurism, and the World Health Organization)
+* **Medium** and other **blogs and news sites** (TechCrunch, Ars Technica, Futurism, CoinDesk, Decrypt, The Block, MarketWatch, CNBC, Harvard Business Review, Fast Company, Fortune, Entrepreneur, the Y Combinator blog, Nature, Phys.org, ScienceDaily, and the World Health Organization)
 * **Dev.to**, for developer articles
-* **GitHub**, for new software releases
 * **arXiv**, for research papers
-* **Product Hunt**, for new products
-* **NASA**, for space pictures and news
 * **The Guardian**, for world news
 * **Yahoo Finance**, for market and stock news
 
-Most of these work right away with no setup. A few need a free key, which is explained below.
+You can add any other news site or blog that has an RSS feed on the **Sources** page.
+
+Almost all of these work right away with no setup. YouTube and The Guardian need a free key, which is explained below. The **Sources** page groups sources into "No key needed" and "Needs a key".
 
 ## What you need before you start
 
@@ -103,11 +102,12 @@ Across the top or side you will find these pages:
 * **Dashboard**, a summary of what is happening.
 * **Niches**, where you choose your topics and how they sound.
 * **Queue**, where you see and manage draft posts.
-* **Schedule**, where you set posting times.
+* **Schedule**, where you set when and how often to post.
 * **Sources**, where you turn content sources on or off and add their keys.
 * **History**, where you see what was posted and what it cost.
 * **Logs**, a running record of activity.
-* **Settings**, where you control practice mode, limits, and your account keys.
+* **Settings**, where you control practice mode, your voice samples, limits, and your account keys.
+* **Raw Data**, where you can see the stories OpenX has gathered and which one it would post about next.
 
 ## Setting up your topics
 
@@ -117,6 +117,14 @@ Across the top or side you will find these pages:
 4. Save your changes.
 
 Only the topics you turn on are used. The rest are ignored.
+
+## Teaching OpenX your voice
+
+On the **Settings** page, under **Voice samples**, paste three to five real posts that sound the way you want your account to sound. OpenX copies their style (short paragraphs, casual wording, the way lines break), never their topics. It comes with a few example posts so it works straight away. A topic can have its own samples too, on the **Niches** page under "Voice override".
+
+## How OpenX picks what to post
+
+Everything your sources bring in goes into one shared pool of stories. When several sites report the same news, OpenX treats it as one story and sees that it is big news. Before each post it ranks the stories it hasn't used yet (fresh, widely covered, on topic, not a repeat of what you just posted), reads the full article for the winner, and writes one post. A story is never posted twice from the same account. This ranking costs nothing; each post uses only one or two small AI requests.
 
 ## Choosing the AI that writes your posts
 
@@ -135,7 +143,7 @@ You may want these keys:
 
 * **An AI key**, only if you chose a paid AI like Claude, ChatGPT, or Gemini. You add it on the **Settings** page.
 * **An image key (Unsplash)**, only if you want stock photos attached to posts. You add it on the **Settings** page, alongside your AI keys. Without it, topics set to use Unsplash photos simply post without an image.
-* **Source keys**, only for the few sources that need one. These are YouTube, Product Hunt, and The Guardian. Everything else works without a key.
+* **Source keys**, only for the few sources that need one. These are YouTube and The Guardian. Everything else works without a key.
 * **Your X account keys**, when you are ready to post for real (see below).
 
 Your AI key, image key, and X account keys belong to the workspace you are in, so different workspaces can use different keys. To add a source key, open the **Sources** page, find the source, paste its key, turn the source on, and save (source keys are shared across all workspaces).
@@ -148,13 +156,14 @@ Until you connect an account, OpenX stays in practice mode and never posts.
 
 ## Setting your posting schedule
 
-Open the **Schedule** page to decide when and how often OpenX posts for each topic. You can set:
+Open the **Schedule** page to decide when and how often your account posts. You can set:
 
-* **The times of day** it is allowed to post, for example morning and evening windows.
-* **How many posts per day**, given as a range such as 2 to 4. OpenX picks a natural number in that range each day.
-* **The gap between posts**, so they are nicely spaced out and never bunched together.
+* **The posting window**, the hours of the day it is allowed to post, for example 9am to 9pm.
+* **Post every**, how often to post inside that window, for example every 45 minutes.
+* **Randomness**, how much each gap varies, so your account looks natural rather than automated.
+* **Minimum gap**, a safety limit so two posts are never too close together.
 
-OpenX adds small random changes to the exact times so your account looks natural rather than automated.
+The page shows when the next post will go out and what was posted today. About five minutes before each post, OpenX checks your sources for fresh news so the post is up to date.
 
 ## Practice mode and going live
 
@@ -165,8 +174,8 @@ OpenX has a safety switch on the **Settings** page.
 
 There is also a choice between two ways of working:
 
-* **Manual.** OpenX prepares drafts and waits. Nothing goes out until you say so.
-* **Automatic.** OpenX posts on its own at the scheduled times.
+* **Manual.** OpenX writes a draft on your schedule and waits for you. Nothing goes out until you say so. Once a few drafts are waiting, it pauses so it doesn't use AI for posts you haven't looked at.
+* **Automatic.** OpenX posts on its own on your schedule.
 
 Start in practice mode and manual. Move to live and automatic only when you trust the results.
 

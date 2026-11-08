@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from opensocial.core.models import ContentItem
-from opensocial.sources.base import Source, register
+from opensocial.sources.base import Setting, Source, register
 from opensocial.sources.rss import fetch_feeds
 
 
@@ -18,6 +18,14 @@ from opensocial.sources.rss import fetch_feeds
 class MediumSource(Source):
     name = "medium"
     category = "generic"
+    trust = 0.35
+    label = "Medium"
+    description = "Newest Medium posts for each tag (about 10 per tag), via tag RSS feeds."
+    settings = (
+        Setting("tags", "Medium tags, e.g. artificial-intelligence.", []),
+        Setting("feeds", "Extra Medium feed URLs (publications, authors).", []),
+        Setting("category", "Category tag for fetched items.", "generic"),
+    )
 
     async def fetch(self) -> list[ContentItem]:
         category: str = self.config.get("category", self.category)

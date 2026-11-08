@@ -1,14 +1,10 @@
 import React, { useState } from 'react';
 import { Check, ChevronsUpDown, Plus, Settings as Cog } from 'lucide-react';
 import { useApp } from '../AppContext';
-
-const inputStyle = {
-  colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 8,
-  color: '#e7eaef', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, padding: '9px 11px',
-};
+import { Button, Modal, fieldStyle } from './common';
 
 // Modal: name a new workspace, then drop into its fresh dashboard.
-function CreateWorkspaceModal({ onClose }) {
+export function CreateWorkspaceModal({ onClose }) {
   const { createWorkspace } = useApp();
   const [name, setName] = useState('');
   const [cap, setCap] = useState('');
@@ -30,52 +26,40 @@ function CreateWorkspaceModal({ onClose }) {
   };
 
   return (
-    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(5,7,10,.66)', display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(2px)' }}>
-      <div onClick={(e) => e.stopPropagation()} className="lane-open" style={{ width: 420, maxWidth: '92vw', background: '#111419', border: '1px solid #232932', borderRadius: 14, padding: '22px 24px', boxShadow: '0 24px 70px rgba(0,0,0,.6)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-          <span style={{ display: 'inline-flex', width: 34, height: 34, borderRadius: 9, alignItems: 'center', justifyContent: 'center', background: 'rgba(122,162,247,.12)', color: '#7aa2f7', flexShrink: 0 }}>
-            <Plus size={18} />
-          </span>
-          <div>
-            <div style={{ fontSize: 15, fontWeight: 700 }}>New workspace</div>
-            <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>its own niches, schedule, AI &amp; publishing — sources stay shared</div>
-          </div>
-        </div>
-
-        <div style={{ marginTop: 18 }}>
-          <div className="os-mono" style={{ fontSize: 10, color: '#7a828f', marginBottom: 7 }}>workspace name</div>
-          <input
-            autoFocus value={name} onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') create(); if (e.key === 'Escape') onClose(); }}
-            placeholder="e.g. Tech account, Crypto brand…"
-            style={{ ...inputStyle, width: '100%' }}
-          />
-        </div>
-
-        <div style={{ marginTop: 14 }}>
-          <div className="os-mono" style={{ fontSize: 10, color: '#7a828f', marginBottom: 7 }}>daily post cap <span style={{ color: '#4b5563' }}>· optional, blank = unlimited</span></div>
-          <input
-            type="number" min="0" value={cap} onChange={(e) => setCap(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') create(); }}
-            placeholder="∞"
-            style={{ ...inputStyle, width: 120, textAlign: 'center' }}
-          />
-        </div>
-
-        <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 14, lineHeight: 1.5 }}>
-          You can enroll this workspace's X credentials later in Settings → Credentials. Until then it stays in dry-run (no live posts).
-        </div>
-
-        {error && <div className="os-mono" style={{ fontSize: 10.5, color: '#f5455c', marginTop: 12 }}>{error}</div>}
-
-        <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
-          <button onClick={onClose} className="hover-border-text" style={{ flex: 1, border: '1px solid #232932', background: 'transparent', color: '#9aa3af', cursor: 'pointer', fontSize: 12.5, fontWeight: 600, padding: '10px', borderRadius: 9 }}>Cancel</button>
-          <button onClick={create} disabled={!armed} style={{ flex: 1.4, border: 'none', cursor: armed ? 'pointer' : 'default', fontSize: 12.5, fontWeight: 700, padding: '10px', borderRadius: 9, background: armed ? '#3ecf8e' : '#1c222b', color: armed ? '#0a0c0f' : '#7a828f' }}>
-            {busy ? 'Creating…' : 'Create workspace'}
-          </button>
-        </div>
+    <Modal onClose={onClose} icon={<Plus size={18} />} title="New workspace" sub="its own niches, schedule, AI and publishing · sources stay shared" width={420}>
+      <div style={{ marginTop: 18 }}>
+        <div className="os-mono" style={{ fontSize: 10, color: '#7a828f', marginBottom: 7 }}>workspace name</div>
+        <input
+          autoFocus value={name} onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') create(); }}
+          placeholder="e.g. Tech account, Crypto brand…"
+          style={{ ...fieldStyle, width: '100%' }}
+        />
       </div>
-    </div>
+
+      <div style={{ marginTop: 14 }}>
+        <div className="os-mono" style={{ fontSize: 10, color: '#7a828f', marginBottom: 7 }}>daily post cap <span style={{ color: '#4b5563' }}>· optional, blank = no cap</span></div>
+        <input
+          type="number" min="0" value={cap} onChange={(e) => setCap(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') create(); }}
+          placeholder="∞"
+          style={{ ...fieldStyle, width: 120, textAlign: 'center' }}
+        />
+      </div>
+
+      <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 14, lineHeight: 1.5 }}>
+        Enroll its X account later in Settings → Credentials. Until then it stays in dry-run.
+      </div>
+
+      {error && <div className="os-mono" style={{ fontSize: 10.5, color: '#f5455c', marginTop: 12 }}>{error}</div>}
+
+      <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+        <Button onClick={onClose} style={{ flex: 1, padding: 10 }}>Cancel</Button>
+        <Button variant="primary" onClick={create} disabled={!armed} style={{ flex: 1.4, padding: 10 }}>
+          {busy ? 'Creating…' : 'Create workspace'}
+        </Button>
+      </div>
+    </Modal>
   );
 }
 

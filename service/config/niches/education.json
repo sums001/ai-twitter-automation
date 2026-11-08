@@ -28,13 +28,6 @@
     "dup_threshold": 0.8,
     "dup_window_days": 5
   },
-  "prioritization": {
-    "recency_weight": 0.35,
-    "engagement_weight": 0.3,
-    "relevance_weight": 0.15,
-    "sentiment_weight": 0.2,
-    "half_life_hours": 48
-  },
   "sources": {
     "googlenews": {
       "query": "education",

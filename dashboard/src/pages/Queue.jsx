@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { ChevronDown, Copy, Check, ExternalLink } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Copy, Check, ExternalLink } from 'lucide-react';
 import { useApp } from '../AppContext';
 import { NICHES, NICHE_COLOR, nicheLabel } from '../data';
 import { api, usePoll } from '../api';
 import { ago, daysAgo, dayLabel, hm } from '../utils';
-import { Card, TypeBadge, StatusBadge, NicheTag, MediaThumb, EmptyState } from '../components/common';
+import { Button, Card, EmptyState, MediaThumb, NicheTag, Segmented, StatusBadge, Tag, TypeBadge, fieldStyle } from '../components/common';
 import PostPreview from '../components/PostPreview';
 
 // searchable single-select category dropdown (scales past 18 categories)
@@ -13,7 +13,7 @@ export function CategoryDropdown() {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
 
-  const options = [{ slug: 'all', label: 'All categories' }]
+  const options = [{ slug: 'all', label: 'All niches' }]
     .concat(NICHES.map((s) => ({ slug: s, label: nicheLabel(s) })))
     .filter((o) => !search || o.label.toLowerCase().includes(search.toLowerCase()));
 
@@ -29,13 +29,13 @@ export function CategoryDropdown() {
         onClick={() => setOpen((o) => !o)}
         className="hover-border"
         style={{
-          display: 'flex', alignItems: 'center', gap: 9, background: '#10141a', border: '1px solid #1f242d',
-          borderRadius: 9, padding: '7px 12px', cursor: 'pointer', minWidth: 188,
+          display: 'flex', alignItems: 'center', gap: 9, background: '#0d1116', border: '1px solid #1c212a',
+          borderRadius: 8, padding: '7px 12px', cursor: 'pointer', minWidth: 180, fontFamily: 'inherit',
         }}
       >
         {niche !== 'all' && <span style={{ width: 8, height: 8, borderRadius: 2, flexShrink: 0, background: NICHE_COLOR[niche] }} />}
         <span style={{ flex: 1, textAlign: 'left', fontSize: 12.5, fontWeight: 600, color: '#e7eaef' }}>
-          {niche === 'all' ? 'All categories' : nicheLabel(niche)}
+          {niche === 'all' ? 'All niches' : nicheLabel(niche)}
         </span>
         <span style={{ display: 'inline-flex', color: '#7a828f' }}><ChevronDown size={14} /></span>
       </button>
@@ -52,7 +52,7 @@ export function CategoryDropdown() {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search categories…"
+              placeholder="Search niches…"
               style={{
                 width: '100%', colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a',
                 borderRadius: 7, color: '#e7eaef', fontFamily: 'inherit', fontSize: 12, padding: '7px 10px', marginBottom: 5,
@@ -86,11 +86,6 @@ export function CategoryDropdown() {
     </div>
   );
 }
-
-const ghostBtn = {
-  border: '1px solid #232932', background: 'transparent', color: '#9aa3af', cursor: 'pointer',
-  fontFamily: "'JetBrains Mono', monospace", fontSize: 10, padding: '5px 10px', borderRadius: 7,
-};
 
 function QueueCard({ post, reload, maxAttempts }) {
   const { commands, runCommand } = useApp();
@@ -157,16 +152,9 @@ function QueueCard({ post, reload, maxAttempts }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
           <TypeBadge type={post.type} />
           <StatusBadge status={post.status} />
-          <span
-            className="os-mono"
-            style={{
-              fontSize: 9, fontWeight: 600, padding: '2px 7px', borderRadius: 5,
-              background: !post.independent ? 'rgba(122,162,247,.1)' : 'rgba(180,142,247,.1)',
-              color: !post.independent ? '#7aa2f7' : '#b48ef7',
-            }}
-          >
-            {!post.independent ? `src · ${post.source}` : 'independent'}
-          </span>
+          {!post.independent
+            ? <Tag fg="#7aa2f7" bg="rgba(122,162,247,.1)">{post.source}</Tag>
+            : <Tag fg="#b48ef7" bg="rgba(180,142,247,.1)">synthesis</Tag>}
           <NicheTag niche={post.niche} />
           <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>{post.id.slice(0, 10)}</span>
         </div>
@@ -179,20 +167,11 @@ function QueueCard({ post, reload, maxAttempts }) {
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               rows={4}
-              style={{
-                width: '100%', colorScheme: 'dark', background: '#0d1116', border: '1px solid #2f3947',
-                borderRadius: 8, color: '#e7eaef', fontFamily: 'inherit', fontSize: 13, lineHeight: 1.5,
-                padding: '9px 11px', resize: 'vertical',
-              }}
+              style={{ ...fieldStyle, width: '100%', fontFamily: 'inherit', fontSize: 13, lineHeight: 1.5, resize: 'vertical' }}
             />
-            <div style={{ display: 'flex', gap: 6, marginTop: 7 }}>
-              <button
-                onClick={saveEdit}
-                style={{ border: 'none', background: '#3ecf8e', color: '#0a0c0f', cursor: 'pointer', fontSize: 11, fontWeight: 700, padding: '6px 14px', borderRadius: 7 }}
-              >
-                save
-              </button>
-              <button onClick={() => { setEditing(false); setDraft(post.text); }} style={ghostBtn}>cancel</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 7 }}>
+              <Button size="sm" variant="primary" onClick={saveEdit}>Save</Button>
+              <Button size="sm" onClick={() => { setEditing(false); setDraft(post.text); }}>Cancel</Button>
               <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: draft.length > 280 ? '#f5455c' : '#5b6470' }}>{draft.length}/280</span>
             </div>
           </div>
@@ -221,57 +200,39 @@ function QueueCard({ post, reload, maxAttempts }) {
             </span>
           </div>
           <span className="os-mono" style={{ fontSize: 10, color: '#5b6470' }}>created {ago(post.created_at)} ago</span>
-          <span className="os-mono" style={{ fontSize: 10, color: '#7aa2f7' }}>
-            {post.scheduled_at ? `→ ${hm(post.scheduled_at)}` : 'unscheduled'}
-          </span>
+          {post.scheduled_at && (
+            <span className="os-mono" style={{ fontSize: 10, color: '#7aa2f7' }}>→ {hm(post.scheduled_at)}</span>
+          )}
           {!editing && (
             <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <button
-                onClick={copyText}
-                className="hover-border-text"
-                title="Copy post text"
-                style={{ ...ghostBtn, display: 'inline-flex', alignItems: 'center', gap: 5, color: copied ? '#3ecf8e' : '#9aa3af' }}
-              >
-                {copied ? <Check size={11} /> : <Copy size={11} />}
-                {copied ? 'copied' : 'copy text'}
-              </button>
+              <Button size="sm" variant="ghost" onClick={copyText} title="Copy post text" icon={copied ? <Check size={11} /> : <Copy size={11} />} style={copied ? { color: '#3ecf8e' } : null}>
+                {copied ? 'Copied' : 'Copy'}
+              </Button>
               {post.source_url && (
                 <a
                   href={post.source_url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="hover-border-text"
+                  className="hover-bright"
                   title={post.source_url}
-                  style={{ ...ghostBtn, display: 'inline-flex', alignItems: 'center', gap: 5, textDecoration: 'none' }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 5, textDecoration: 'none', fontSize: 11, fontWeight: 600, color: '#7a828f', padding: '5px 10px', borderRadius: 7 }}
                 >
                   <ExternalLink size={11} />
-                  source
+                  Source
                 </a>
               )}
             </div>
           )}
           {actionable && !editing && (
             <div onClick={(e) => e.stopPropagation()} style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-              <button
-                onClick={() => !posting && runCommand('post_now', { generated_post_id: post.id })}
-                className="hover-green-btn"
-                style={{
-                  border: '1px solid rgba(62,207,142,.35)', background: 'rgba(62,207,142,.1)', color: '#3ecf8e',
-                  cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 600,
-                  padding: '5px 10px', borderRadius: 7,
-                }}
-              >
-                {posting ? 'posting…' : 'post now'}
-              </button>
-              <button onClick={() => setEditing(true)} className="hover-border-text" style={ghostBtn}>edit</button>
-              <button
-                onClick={() => !regenerating && runCommand('regenerate_post', { generated_post_id: post.id })}
-                className="hover-border-text"
-                style={ghostBtn}
-              >
-                {regenerating ? 'regenerating…' : 'regenerate'}
-              </button>
-              <button onClick={() => !busy && act('reject')} className="hover-danger" style={{ ...ghostBtn, color: '#f5455c' }}>reject</button>
+              <Button size="sm" variant="soft" onClick={() => !posting && runCommand('post_now', { generated_post_id: post.id })}>
+                {posting ? 'Posting…' : 'Post now'}
+              </Button>
+              <Button size="sm" onClick={() => setEditing(true)}>Edit</Button>
+              <Button size="sm" onClick={() => !regenerating && runCommand('regenerate_post', { generated_post_id: post.id })}>
+                {regenerating ? 'Regenerating…' : 'Regenerate'}
+              </Button>
+              <Button size="sm" variant="danger" onClick={() => !busy && act('reject')}>Reject</Button>
             </div>
           )}
         </div>
@@ -280,7 +241,7 @@ function QueueCard({ post, reload, maxAttempts }) {
   );
 }
 
-const STATUS_FILTERS = ['all', 'draft', 'published', 'rejected'];
+const STATUS_FILTERS = [['all', 'All'], ['draft', 'Drafts'], ['published', 'Published'], ['rejected', 'Rejected']];
 
 export default function Queue() {
   const { niche, status, withAccount } = useApp();
@@ -290,73 +251,37 @@ export default function Queue() {
     withAccount(niche === 'all' ? '/api/posts' : `/api/posts?niche=${encodeURIComponent(niche)}`),
     5000
   );
-  const all = (posts || []).filter((p) => statusFilter === 'all' || p.status === statusFilter);
+  const everything = posts || [];
+  const all = everything.filter((p) => statusFilter === 'all' || p.status === statusFilter);
+  const count = (k) => (k === 'all' ? everything.length : everything.filter((p) => p.status === k).length);
 
   const maxDay = all.reduce((m, p) => Math.max(m, daysAgo(p.created_at)), 0);
   const cur = Math.min(page, maxDay);
   const rows = all.filter((p) => daysAgo(p.created_at) === cur); // API is newest-first
 
-  const arrowStyle = (disabled) => ({
-    border: '1px solid #1c212a', background: 'transparent', color: disabled ? '#3b414b' : '#9aa3af',
-    cursor: disabled ? 'default' : 'pointer', fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 13, fontWeight: 700, padding: '4px 9px', borderRadius: 6,
-  });
-
   return (
     <div>
-      {/* one filter row: category dropdown + day pagination (Today = page 1) */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 11, flexWrap: 'wrap', marginBottom: 16 }}>
+      {/* one filter row: niche, status, then day paging (newest day first) */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
         <CategoryDropdown />
-        <span style={{ width: 1, height: 20, background: '#1f242d' }} />
-        <div style={{ display: 'flex', gap: 4 }}>
-          {STATUS_FILTERS.map((f) => {
-            const active = statusFilter === f;
-            return (
-              <button
-                key={f}
-                onClick={() => { setStatusFilter(f); setPage(0); }}
-                className="hover-border"
-                style={{
-                  border: `1px solid ${active ? '#2f3947' : '#1c212a'}`, cursor: 'pointer',
-                  fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, fontWeight: 600,
-                  padding: '5px 10px', borderRadius: 7,
-                  background: active ? '#1c222b' : 'transparent', color: active ? '#e7eaef' : '#7a828f',
-                }}
-              >
-                {f}
-              </button>
-            );
-          })}
+        <Segmented
+          options={STATUS_FILTERS.map(([k, l]) => [k, l, count(k)])}
+          value={statusFilter}
+          onChange={(f) => { setStatusFilter(f); setPage(0); }}
+        />
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Button size="sm" onClick={() => setPage(cur + 1)} disabled={cur >= maxDay} title="older day" icon={<ChevronLeft size={13} />} />
+          <span className="os-mono" style={{ minWidth: 110, textAlign: 'center', fontSize: 11, fontWeight: 600, color: '#cfd6df' }}>
+            {dayLabel(cur)} · {rows.length}
+          </span>
+          <Button size="sm" onClick={() => setPage(cur - 1)} disabled={cur === 0} title="newer day" icon={<ChevronRight size={13} />} />
         </div>
-        <span style={{ width: 1, height: 20, background: '#1f242d' }} />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <button onClick={() => cur > 0 && setPage(cur - 1)} className="hover-border" style={arrowStyle(cur === 0)}>‹</button>
-          {Array.from({ length: maxDay + 1 }, (_, i) => (
-            <button
-              key={i}
-              onClick={() => setPage(i)}
-              title={dayLabel(i)}
-              style={{
-                minWidth: 26, border: `1px solid ${i === cur ? '#2f3947' : '#1c212a'}`, cursor: 'pointer',
-                fontFamily: "'JetBrains Mono', monospace", fontSize: 11, fontWeight: 600, padding: '5px 8px',
-                borderRadius: 6, background: i === cur ? '#1c222b' : 'transparent', color: i === cur ? '#e7eaef' : '#7a828f',
-              }}
-            >
-              {i + 1}
-            </button>
-          ))}
-          <button onClick={() => cur < maxDay && setPage(cur + 1)} className="hover-border" style={arrowStyle(cur >= maxDay)}>›</button>
-        </div>
-        <span className="os-mono" style={{ fontSize: 11, fontWeight: 600, color: '#cfd6df' }}>{dayLabel(cur)}</span>
-        <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 11, color: '#5b6470', whiteSpace: 'nowrap' }}>
-          {rows.length}{rows.length === 1 ? ' post' : ' posts'}
-        </span>
       </div>
 
       {rows.length === 0 && (
         <EmptyState
           title={`No posts on ${dayLabel(cur)}`}
-          sub={posts ? 'nothing was generated for this day — try "Generate now" on the dashboard' : 'loading…'}
+          sub={posts ? 'drafts are written at each posting mark · or use Quick actions → Write a draft' : 'loading…'}
         />
       )}
 

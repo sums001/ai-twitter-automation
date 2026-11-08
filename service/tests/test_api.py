@@ -1,7 +1,7 @@
 """Dashboard HTTP API tests (FastAPI TestClient — no server, no network).
 
 Covers the runtime-settings overlay, the read endpoints' shapes, the approval
-transitions over HTTP, niche config + schedule writes, source toggles, the
+transitions over HTTP, niche config, the account cadence, voice samples, the knowledge base, source toggles, the
 command queue, and credential storage (env secrets + X account enrollment).
 """
 
@@ -225,66 +225,80 @@ def test_overview_funnel_hides_untracked_niches(client, tmp_path):
     assert "off" not in slugs    # has source but not selected
 
 
-def test_schedule_resolves_slots(client):
-    body = client.get("/api/schedule").json()
-    lane = next(n for n in body["niches"] if n["slug"] == NICHE)
-    assert lane["posts_per_day"] == [2, 2]
-    assert len(lane["slots"]) == 2  # fixed range resolves exactly 2 slots
-    assert lane["windows"] == [["09:00", "12:00"]]
+def _account(client, label="main"):
+    return client.post("/api/accounts", json={"label": label}).json()["id"]
 
 
-def test_schedule_put_writes_config(client, tmp_path):
+def test_schedule_returns_account_cadence(client):
+    acct = _account(client)
+    client.put(f"/api/niches/followed?account={acct}", json={"slugs": [NICHE]})
+    body = client.get(f"/api/schedule?account={acct}").json()
+    # Seeded from the followed niche's legacy window on first read.
+    assert body["cadence"]["window"] == ["09:00", "12:00"]
+    assert body["cadence"]["every_minutes"] == 60
+    assert body["mode"] == "manual" and body["dry_run"] is True
+    assert body["posted_today"] == [] and body["pending_drafts"] == 0
+    assert len(body["window_today"]) == 2
+
+
+def test_schedule_put_saves_cadence_and_validates(client):
+    acct = _account(client)
     res = client.put(
-        f"/api/niches/{NICHE}/schedule",
-        json={"windows": [["08:00", "10:00"]], "posts_per_day": [1, 4], "min_gap_minutes": 50},
+        f"/api/schedule?account={acct}",
+        json={"window": ["08:00", "22:00"], "every_minutes": 30, "jitter_pct": 25,
+              "min_gap_minutes": 15, "max_pending_drafts": 4},
     )
     assert res.status_code == 200
-    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
-    assert on_disk["schedule"]["windows"] == [["08:00", "10:00"]]
-    assert on_disk["schedule"]["posts_per_day"] == [1, 4]
-    # bad window format rejected
-    assert client.put(
-        f"/api/niches/{NICHE}/schedule",
-        json={"windows": [["8am", "10"]], "posts_per_day": [1, 2], "min_gap_minutes": 5},
-    ).status_code == 422
+    cad = res.json()["cadence"]
+    assert cad == {"window": ["08:00", "22:00"], "every_minutes": 30, "jitter_pct": 25,
+                   "min_gap_minutes": 15}
+    assert client.get(f"/api/schedule?account={acct}").json()["cadence"]["every_minutes"] == 30
+    bad = {"window": ["22:00", "08:00"], "every_minutes": 30}
+    assert client.put(f"/api/schedule?account={acct}", json=bad).status_code == 422
+    bad = {"window": ["8am", "10"], "every_minutes": 30}
+    assert client.put(f"/api/schedule?account={acct}", json=bad).status_code == 422
+    bad = {"window": ["08:00", "22:00"], "every_minutes": 1}
+    assert client.put(f"/api/schedule?account={acct}", json=bad).status_code == 422
 
 
-def test_schedule_only_includes_scheduled_niches(client, tmp_path):
-    # Dropping the schedule block takes the niche off the schedule entirely.
-    res = client.delete(f"/api/niches/{NICHE}/schedule")
-    assert res.status_code == 200
-    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
-    assert "schedule" not in on_disk
-    body = client.get("/api/schedule").json()
-    assert all(n["slug"] != NICHE for n in body["niches"])
+def test_old_per_niche_schedule_endpoints_are_gone(client):
+    assert client.post("/api/schedule/randomize", json={}).status_code in (404, 405)
+    assert client.delete(f"/api/niches/{NICHE}/schedule").status_code in (404, 405)
 
 
-def test_randomize_splits_total_across_scheduled(client, tmp_path):
-    res = client.post(
-        "/api/schedule/randomize",
-        json={"window": ["08:00", "20:00"], "total_posts": 7, "min_gap_minutes": 30},
-    )
-    assert res.status_code == 200
-    lanes = res.json()["niches"]
-    # Single scheduled niche → it receives the whole total.
-    total = sum(lane["posts_per_day"][0] for lane in lanes)
-    assert total == 7
-    lane = next(n for n in lanes if n["slug"] == NICHE)
-    assert lane["windows"] == [["08:00", "20:00"]]
-    assert lane["posts_per_day"][0] == lane["posts_per_day"][1]  # exact share
-    on_disk = json.loads((tmp_path / "niches" / f"{NICHE}.json").read_text())
-    assert on_disk["schedule"]["min_gap_minutes"] == 30
-    # bad time range rejected
-    assert client.post(
-        "/api/schedule/randomize",
-        json={"window": ["20:00", "08:00"], "total_posts": 3},
-    ).status_code == 422
+def test_voice_samples_default_save_and_reset(client):
+    acct = _account(client)
+    body = client.get(f"/api/voice?account={acct}").json()
+    assert body["default"] is True and len(body["samples"]) == 5
+    saved = client.put(f"/api/voice?account={acct}",
+                       json={"samples": ["  one  ", "", "two", "one"]}).json()
+    assert saved == {"samples": ["one", "two"], "default": False}
+    other = _account(client, "other")
+    assert client.get(f"/api/voice?account={other}").json()["default"] is True  # isolated
+    assert client.delete(f"/api/voice?account={acct}").json()["default"] is True
 
 
-def test_randomize_requires_scheduled_niche(client):
-    client.delete(f"/api/niches/{NICHE}/schedule")
-    res = client.post("/api/schedule/randomize", json={"window": ["09:00", "18:00"], "total_posts": 4})
-    assert res.status_code == 400
+def test_stories_endpoint_lists_the_shortlist(client):
+    from datetime import datetime, timezone
+
+    from opensocial.core.filtering import filter_niche
+    from opensocial.core.knowledge import ingest
+
+    acct = _account(client)
+    client.put(f"/api/niches/followed?account={acct}", json={"slugs": [NICHE]})
+    sf = client.app.state.session_factory
+    with sf() as s:
+        store_items(s, [ContentItem(
+            source_name="hackernews", source_category="tech", title="Open model ships",
+            url="https://a.com/1", published_at=datetime.now(timezone.utc),
+        )], NICHE)
+        filter_niche(s, NICHE, NICHE_CONFIG)
+        ingest(s)
+    body = client.get(f"/api/stories?account={acct}").json()
+    assert body["total_stories"] == 1
+    assert body["shortlist"][0]["title"] == "Open model ships"
+    assert "coverage" in body["shortlist"][0]["signals"]
+    assert body["used"] == []
 
 
 def test_niche_put_roundtrip(client, tmp_path):
@@ -335,6 +349,20 @@ def test_sources_static_vs_dynamic(client):
     assert sources["reddit"]["origin_label"]
     assert sources["reddit"]["origins"] == []
     assert sources["hackernews"]["category"] == "tech"
+
+
+def test_sources_describe_key_requirement(client, monkeypatch):
+    monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)
+    sources = {s["id"]: s for s in client.get("/api/sources").json()}
+    hn, guardian = sources["hackernews"], sources["guardian"]
+    assert hn["auth"] == "none" and hn["key"] is None and hn["needs_key"] is False
+    assert hn["description"] and {s["name"] for s in hn["settings"]} >= {"query", "limit"}
+    assert guardian["auth"] == "required" and guardian["needs_key"] is True and guardian["key_help"]
+    assert guardian["key_envs"] == ["GUARDIAN_API_KEY"]
+    # source keys in the credentials list come from the registry
+    platforms = {g["platform"] for g in client.get("/api/credentials").json()}
+    assert {"The Guardian", "YouTube"} <= platforms
+    assert not {"Product Hunt", "NASA", "GitHub", "GitHub Releases"} & platforms
 
 
 def test_origin_add_and_remove_roundtrip(client, tmp_path):
@@ -421,6 +449,14 @@ def test_ai_config_default_and_put(client):
     assert set(body["key_status"]) == {
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GROQ_API_KEY",
+        "MISTRAL_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "LOCAL_LLM_API_KEY",
+        "CLOUDFLARE_API_TOKEN",
+        "CUSTOM_LLM_API_KEY",
         "UNSPLASH_ACCESS_KEY",
     }
 
@@ -449,6 +485,97 @@ def test_ai_local_provider_requires_endpoint(client):
     )
     assert ok.status_code == 200
     assert ok.json()["text"]["endpoint"] == "http://localhost:11434"
+
+
+def test_ai_providers_registry(client):
+    providers = {p["id"]: p for p in client.get("/api/ai/providers").json()}
+    assert {"claude", "chatgpt", "gemini", "local", "template"} <= set(providers)
+    # local takes an optional key and needs an endpoint
+    assert providers["local"]["key_env"] == "LOCAL_LLM_API_KEY"
+    assert providers["local"]["key_required"] is False
+    assert providers["local"]["endpoint_required"] is True
+    assert providers["template"]["key_env"] is None
+    # an unknown provider is rejected
+    assert client.put("/api/ai", json={"text": {"provider": "nope"}}).status_code == 422
+
+
+def test_ai_test_hosted_provider_needs_key(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    res = client.post("/api/ai/test", json={"text": {"provider": "gemini"}}).json()
+    assert res["ok"] is False and "GEMINI_API_KEY" in res["error"]
+
+
+def test_qualify_model_adds_provider_route():
+    from opensocial.ai.text import qualify_model
+
+    assert qualify_model("claude", "claude-haiku-5-5") == "anthropic/claude-haiku-5-5"
+    assert qualify_model("claude", "anthropic/claude-haiku-5-5") == "anthropic/claude-haiku-5-5"
+    assert qualify_model("openrouter", "meta-llama/llama-3.3-70b-instruct") == (
+        "openrouter/meta-llama/llama-3.3-70b-instruct"
+    )
+    assert qualify_model("local", "ollama/gemma3:4b") == "ollama/gemma3:4b"
+    # custom: OpenAI-compatible unless the id already names a LiteLLM route
+    assert qualify_model("custom", "my-model") == "openai/my-model"
+    assert qualify_model("custom", "meta-llama/Llama-3.3-70B") == "openai/meta-llama/Llama-3.3-70B"
+    assert qualify_model("custom", "together_ai/x/y") == "together_ai/x/y"
+
+
+def test_custom_provider_needs_endpoint_and_model(client):
+    providers = {p["id"]: p for p in client.get("/api/ai/providers").json()}
+    custom = providers["custom"]
+    assert custom["key_env"] == "CUSTOM_LLM_API_KEY" and custom["key_required"] is False
+    assert client.put("/api/ai", json={"text": {"provider": "custom", "model": "m"}}).status_code == 422
+    assert client.put(
+        "/api/ai", json={"text": {"provider": "custom", "endpoint": "https://x.test/v1"}}
+    ).status_code == 422
+    ok = client.put(
+        "/api/ai",
+        json={"text": {"provider": "custom", "endpoint": "https://x.test/v1", "model": "m"}},
+    )
+    assert ok.status_code == 200 and ok.json()["text"]["provider"] == "custom"
+
+
+def test_cloudflare_provider_builds_endpoint_from_account_id(client):
+    from opensocial.ai.text import get_text_provider
+
+    acct = "f" * 32
+    # account id is required
+    assert client.put("/api/ai", json={"text": {"provider": "cloudflare"}}).status_code == 422
+    # pasted as a dashboard URL, it is stored as the bare id
+    saved = client.put(
+        "/api/ai",
+        json={"text": {"provider": "cloudflare", "account_id": f"https://dash.cloudflare.com/{acct}"
+                       .replace("dash.cloudflare.com/", "dash.cloudflare.com/accounts/")}},
+    ).json()["text"]
+    assert saved["account_id"] == acct
+    # no inherited localhost endpoint or ollama model from the local default
+    assert "endpoint" not in saved and "model" not in saved
+
+    p = get_text_provider({"ai": {"text": {**saved, "api_key": "t"}}})
+    assert p.api_base == f"https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1"
+    assert p.model == "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    # an explicit base URL (AI Gateway) wins over the template
+    gw = get_text_provider({"ai": {"text": {**saved, "endpoint": "https://gw.test/v1", "model": "@cf/qwen/qwen3.8-27b"}}})
+    assert gw.api_base == "https://gw.test/v1" and gw.model == "openai/@cf/qwen/qwen3.8-27b"
+
+
+def test_custom_provider_builds_keyless_openai_route():
+    from opensocial.ai.text import get_text_provider
+
+    p = get_text_provider(
+        {"ai": {"text": {"provider": "custom", "endpoint": "https://x.test/v1", "model": "m"}}}
+    )
+    assert p.model == "openai/m" and p.api_base == "https://x.test/v1" and p.api_key == "local"
+
+
+def test_settings_patch_install_limits(client):
+    body = client.patch(
+        "/api/settings", json={"global_daily_cap": 12, "max_post_attempts": 5}
+    ).json()
+    assert body["global_daily_cap"] == 12
+    assert body["max_post_attempts"] == 5
+    assert client.patch("/api/settings", json={"max_post_attempts": 0}).status_code == 422
+    assert client.patch("/api/settings", json={"global_daily_cap": -1}).status_code == 422
 
 
 # --- commands -----------------------------------------------------------------
@@ -548,6 +675,23 @@ def test_ai_keys_are_per_workspace(client, monkeypatch):
     # scoped AI keys never leak into the process env
     import os
     assert os.environ.get("OPENAI_API_KEY") is None
+
+    # removing A's key clears it for A only
+    r = client.delete(f"/api/credentials?key=OPENAI_API_KEY&account={a}").json()
+    assert r["removed"] is True and r["set"] is False
+    assert client.get("/api/ai?account=" + a).json()["key_status"]["OPENAI_API_KEY"] is False
+    assert client.delete("/api/credentials?key=PATH").status_code == 422
+
+
+def test_global_credential_delete_drops_env(client, monkeypatch):
+    import os
+
+    monkeypatch.delenv("GUARDIAN_API_KEY", raising=False)
+    client.post("/api/credentials", json={"key": "GUARDIAN_API_KEY", "value": "sek-del"})
+    assert os.environ["GUARDIAN_API_KEY"] == "sek-del"
+    r = client.delete("/api/credentials?key=GUARDIAN_API_KEY").json()
+    assert r["removed"] is True and r["set"] is False
+    assert "GUARDIAN_API_KEY" not in os.environ
 
 
 def test_x_credentials_are_per_workspace(client):
@@ -696,3 +840,19 @@ def test_reset_clear_credentials_wipes_secrets(client, monkeypatch):
     assert not any(k["set"] for k in x["keys"])
     # nothing left to re-inject from the DB
     assert inject_stored_secrets(client.app.state.session_factory) == 0
+
+
+def test_story_ttl_setting(client):
+    assert client.get("/api/status").json()["story_ttl_hours"] == 24
+    assert client.patch("/api/settings", json={"story_ttl_hours": 12}).json()["story_ttl_hours"] == 12
+    assert client.patch("/api/settings", json={"story_ttl_hours": 0}).status_code == 422
+
+
+def test_schedule_reports_status_and_day_tagged_upcoming(client):
+    acct = _account(client)
+    client.put(f"/api/niches/followed?account={acct}", json={"slugs": [NICHE]})
+    body = client.get(f"/api/schedule?account={acct}").json()
+    assert body["status"]["state"] in {"starting", "ok"}
+    assert isinstance(body["now_minute"], int)
+    for u in body["upcoming"]:
+        assert set(u) == {"at", "day", "minute"} and u["day"] in (0, 1)

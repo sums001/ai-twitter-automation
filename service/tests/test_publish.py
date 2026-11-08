@@ -23,13 +23,7 @@ from opensocial.core.db import (
 )
 from opensocial.core.engine import (
     publish_post,
-    run_due_slots,
     select_post,
-)
-from opensocial.core.scheduler import (
-    ScheduleConfig,
-    due_slot_count,
-    resolve_slots,
 )
 from opensocial.core.settings import Settings
 from opensocial.publish.base import (
@@ -48,11 +42,6 @@ _CONFIG = {
     "post_types": {
         "news": {"enabled": True},
         "take": {"enabled": True},
-    },
-    "schedule": {
-        "windows": [["00:00", "23:59"]],
-        "posts_per_day": [3, 3],
-        "min_gap_minutes": 0,
     },
     "posting": {"include_source_link": False},
 }
@@ -102,39 +91,6 @@ def _draft(session, *, ptype="news", score=1.0, independent=False, account_id=No
     )
 
 
-# --- scheduler: cached daily jitter --------------------------------------
-
-
-def test_slots_are_stable_across_ticks():
-    cfg = ScheduleConfig.from_niche(_CONFIG)
-    # Slots resolve on the *local* calendar day (windows are local times).
-    day = datetime(2026, 6, 10, 8, 0).astimezone()
-    a = resolve_slots(cfg, NICHE, day)
-    b = resolve_slots(cfg, NICHE, day.replace(hour=20))  # later tick, same day
-    assert a == b  # jitter rolled once per day, not per tick
-    assert len(a) == 3  # posts_per_day [3,3]
-
-
-def test_slots_differ_by_day():
-    cfg = ScheduleConfig.from_niche(_CONFIG)
-    d1 = resolve_slots(cfg, NICHE, datetime(2026, 6, 10, 12, 0).astimezone())
-    d2 = resolve_slots(cfg, NICHE, datetime(2026, 6, 11, 12, 0).astimezone())
-    assert d1 != d2
-
-
-def test_due_slot_count_counts_recent_slots():
-    # Only slots inside the grace window (now - grace, now] count: an old missed
-    # slot and a future slot are both excluded.
-    now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
-    grace = timedelta(minutes=2)
-    slots = [
-        now - timedelta(hours=2),    # missed: older than grace
-        now - timedelta(minutes=1),  # just due: inside grace
-        now + timedelta(hours=1),    # not yet due
-    ]
-    assert due_slot_count(slots, now, grace) == 1
-
-
 # --- cost model ----------------------------------------------------------
 
 
@@ -143,7 +99,7 @@ def test_cost_model():
     assert estimate_cost(included_source_link=True) == COST_WITH_LINK
 
 
-# --- best-at-slot selection ----------------------------------------------
+# --- draft selection ----------------------------------------------------
 
 
 def test_select_picks_highest_priority(session_factory):
@@ -151,7 +107,7 @@ def test_select_picks_highest_priority(session_factory):
         _draft(s, ptype="news", score=0.2)
         best = _draft(s, ptype="news", score=0.9)
         s.commit()
-        chosen = select_post(s, NICHE, _CONFIG)
+        chosen = select_post(s)
         assert chosen.id == best.id
 
 
@@ -163,10 +119,13 @@ def test_select_post_is_scoped_to_workspace(session_factory):
         a = _draft(s, ptype="news", score=0.9, account_id="wsA")
         b = _draft(s, ptype="news", score=0.5, account_id="wsB")
         s.commit()
-        assert select_post(s, NICHE, _CONFIG, platform_account_id="wsB").id == b.id
-        assert select_post(s, NICHE, _CONFIG, platform_account_id="wsA").id == a.id
+        assert select_post(s, platform_account_id="wsB").id == b.id
+        assert select_post(s, platform_account_id="wsA").id == a.id
+        # Stale drafts are skipped when a freshness bound is given.
+        later = datetime.now(timezone.utc) + timedelta(minutes=1)
+        assert select_post(s, platform_account_id="wsA", created_after=later) is None
         # Unscoped (legacy) selection still returns the global best.
-        assert select_post(s, NICHE, _CONFIG).id == a.id
+        assert select_post(s).id == a.id
 
 
 def test_select_is_priority_only_with_no_per_type_caps(session_factory):
@@ -179,7 +138,7 @@ def test_select_is_priority_only_with_no_per_type_caps(session_factory):
         take = _draft(s, ptype="take", score=0.9)
         _draft(s, ptype="news", score=0.1)
         s.commit()
-        chosen = select_post(s, NICHE, _CONFIG)
+        chosen = select_post(s)
         assert chosen.id == take.id  # highest priority wins, no cap fall-through
 
 
@@ -229,116 +188,6 @@ def test_failure_increments_attempts_then_fails(session_factory):
         publish_post(s, post, _CONFIG, settings, publisher=_FailPublisher())
         assert post.post_attempts == 2
         assert post.status == "failed"  # max attempts reached
-
-
-# --- run_due_slots: modes, catch-up, global cap --------------------------
-
-
-def test_manual_mode_never_publishes(session_factory):
-    with session_factory() as s:
-        _draft(s, ptype="news")
-        s.commit()
-        out = run_due_slots(s, NICHE, _CONFIG, _auto(app_mode="manual"),
-                            publisher=_OkPublisher())
-        assert out == []
-
-
-# A window in the first minute of the (local) day: all slots are already due
-# at any realistic test run time, so real `now` works and slot math agrees
-# with the real timestamps `record_post_history` writes.
-_ALL_DUE = {
-    "windows": [["00:00", "00:01"]],
-    "posts_per_day": [3, 3],
-    "min_gap_minutes": 0,
-}
-
-
-def test_missed_slots_are_skipped(session_factory):
-    # All 3 slots are hours in the past (early-morning window) → none fall in the
-    # grace window, so nothing publishes: missed slots are not caught up.
-    now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
-    with session_factory() as s:
-        for i in range(5):
-            _draft(s, ptype="news", score=i / 10)
-        s.commit()
-        cfg = {**_CONFIG, "schedule": _ALL_DUE}
-        out = run_due_slots(s, NICHE, cfg, _auto(), now=now, publisher=_OkPublisher())
-        assert out == []
-        assert published_today_count(s, niche_slug=NICHE, day=now) == 0
-
-
-def test_just_due_slot_publishes(session_factory, monkeypatch):
-    # A slot whose time landed seconds ago is inside the grace window → it
-    # publishes exactly once (highest-priority draft wins).
-    now = datetime.now(timezone.utc)
-    monkeypatch.setattr(
-        "opensocial.core.engine.resolve_slots",
-        lambda *a, **k: [now - timedelta(seconds=30)],
-    )
-    with session_factory() as s:
-        for i in range(5):
-            _draft(s, ptype="news", score=i / 10)
-        s.commit()
-        out = run_due_slots(s, NICHE, _CONFIG, _auto(), now=now, publisher=_OkPublisher())
-        assert len(out) == 1
-        assert published_today_count(s, niche_slug=NICHE, day=now) == 1
-
-
-def test_account_cap_caps_publishing(session_factory, monkeypatch):
-    # Three slots are within the grace window, but the account's per-account
-    # daily cap of 1 clamps the publish loop to a single post.
-    from opensocial.core.db import PlatformAccount
-
-    now = datetime.now(timezone.utc)
-    monkeypatch.setattr(
-        "opensocial.core.engine.resolve_slots",
-        lambda *a, **k: [now - timedelta(seconds=sec) for sec in (90, 60, 30)],
-    )
-    with session_factory() as s:
-        acct = PlatformAccount(
-            id="acct1", platform="x", account_label="a",
-            credentials_encrypted=b"x", daily_post_cap=1,
-        )
-        s.add(acct)
-        for i in range(5):
-            _draft(s, ptype="news", score=i / 10, account_id="acct1")
-        s.commit()
-        out = run_due_slots(
-            s, NICHE, _CONFIG, _auto(), now=now,
-            publisher=_OkPublisher(), account=acct,
-        )
-        assert len(out) == 1  # per-account cap clamps below the 3 due slots
-        assert published_today_count(
-            s, platform_account_id="acct1", day=now
-        ) == 1
-
-
-def test_credential_less_account_publishes_dry_run_without_crashing(
-    session_factory, monkeypatch
-):
-    # A workspace created without enrolled X credentials has an empty
-    # ``credentials_encrypted``. Resolving credentials for it must not blow up
-    # (an empty blob used to raise Fernet ``InvalidToken`` and kill the worker
-    # tick) — it just stays dry-run and simulates the post.
-    from opensocial.core.db import PlatformAccount
-
-    now = datetime.now(timezone.utc)
-    monkeypatch.setattr(
-        "opensocial.core.engine.resolve_slots",
-        lambda *a, **k: [now - timedelta(seconds=30)],
-    )
-    cfg = {**_CONFIG, "account_id": "wsX"}
-    with session_factory() as s:
-        s.add(PlatformAccount(
-            id="wsX", platform="x", account_label="ws",
-            credentials_encrypted=b"",  # enrolled later — none yet
-        ))
-        _draft(s, ptype="news", score=0.9, account_id="wsX")
-        s.commit()
-        # No publisher/credentials injected → real resolution path runs.
-        out = run_due_slots(s, NICHE, cfg, _auto(dry_run=True), now=now)
-        assert len(out) == 1
-        assert out[0].ok and out[0].dry_run
 
 
 def test_decrypt_bad_blob_raises_secretserror_not_invalidtoken():
@@ -414,14 +263,9 @@ def test_resolve_account_falls_back_to_sole_account(session_factory):
         assert resolve_account_for_niche(s, cfg).id == "second"
 
 
-def test_publish_records_posting_account(session_factory, monkeypatch):
-    # The draft's stamped account is recorded on the post_history row even when
-    # an explicit publisher is injected (no run_due_slots account override).
-    now = datetime.now(timezone.utc)
-    monkeypatch.setattr(
-        "opensocial.core.engine.resolve_slots",
-        lambda *a, **k: [now - timedelta(seconds=30)],
-    )
+def test_publish_records_posting_account(session_factory):
+    # The draft's stamped account is recorded on the post_history row when no
+    # explicit account is passed.
     with session_factory() as s:
         post = insert_generated_post(
             s, niche_slug=NICHE, post_type="news", text="x",
@@ -429,10 +273,8 @@ def test_publish_records_posting_account(session_factory, monkeypatch):
             platform_account_id="acctZ",
         )
         s.commit()
-        out = run_due_slots(
-            s, NICHE, _CONFIG, _auto(), now=now, publisher=_OkPublisher(),
-        )
-        assert len(out) == 1
+        out = publish_post(s, post, _CONFIG, _auto(), publisher=_OkPublisher())
+        assert out.ok
         hist = s.query(PostHistory).one()
         assert hist.status == "success"
         assert hist.platform_account_id == "acctZ"

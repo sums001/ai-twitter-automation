@@ -23,9 +23,11 @@ from opensocial.core.db import (
     make_engine,
     store_items,
 )
+from opensocial.core.config import NicheConfig
 from opensocial.core.engine import load_credentials, select_post
 from opensocial.core.filtering import filter_niche
-from opensocial.core.generate import generate_for_niche
+from opensocial.core.generate import draft_next
+from opensocial.core.knowledge import ingest
 from opensocial.core.models import ContentItem
 from opensocial.core.secrets import (
     decrypt_credentials,
@@ -60,7 +62,6 @@ def _item(title, url):
 _APPROVAL_CONFIG = {
     "slug": "tech",
     "filters": {"relevance_keywords": []},
-    "prioritization": {"recency_weight": 1.0, "engagement_weight": 0.0},
     "post_types": {"news": {"enabled": True}},
     "approval": {"required": True, "timeout_minutes": 60, "on_timeout": "discard"},
 }
@@ -117,14 +118,16 @@ def test_generation_drafts_are_immediately_publishable(session_factory):
     with session_factory() as s:
         store_items(s, [_item("AI model ships", "https://a.com/1")], NICHE)
         filter_niche(s, NICHE, _APPROVAL_CONFIG)
-        drafts = generate_for_niche(
-            s, NICHE, _APPROVAL_CONFIG, text_provider=TemplateProvider(),
+        ingest(s)
+        draft = draft_next(
+            s, "wsA", [NicheConfig.from_dict(_APPROVAL_CONFIG)],
+            text_provider=TemplateProvider(),
         )
-        assert drafts
+        assert draft is not None
         row = s.query(GeneratedPost).one()
         assert row.status == "draft"
         # drafts are publishable straight away
-        assert select_post(s, NICHE, _APPROVAL_CONFIG).id == row.id
+        assert select_post(s, platform_account_id="wsA").id == row.id
 
 
 # --- post lifecycle transitions ------------------------------------------
@@ -141,7 +144,7 @@ def test_draft_is_publishable(session_factory):
     with session_factory() as s:
         post = _draft(s)
         s.commit()
-        assert select_post(s, NICHE, _APPROVAL_CONFIG).id == post.id
+        assert select_post(s).id == post.id
 
 
 def test_reject_removes_from_queue(session_factory):
@@ -150,7 +153,7 @@ def test_reject_removes_from_queue(session_factory):
         s.commit()
         approval.reject(s, post)
         assert post.status == "rejected"
-        assert select_post(s, NICHE, _APPROVAL_CONFIG) is None
+        assert select_post(s) is None
 
 
 def test_edit_replaces_text_and_keeps_draft(session_factory):

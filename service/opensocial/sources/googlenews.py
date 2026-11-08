@@ -20,7 +20,7 @@ from __future__ import annotations
 from urllib.parse import quote_plus
 
 from opensocial.core.models import ContentItem
-from opensocial.sources.base import Source, register
+from opensocial.sources.base import Setting, Source, register
 
 SEARCH_URL = "https://news.google.com/rss/search"
 TOP_URL = "https://news.google.com/rss"
@@ -41,6 +41,19 @@ def build_feed_url(
 class GoogleNewsSource(Source):
     name = "googlenews"
     category = "news"
+    trust = 0.75
+    label = "Google News"
+    description = (
+        "Google News headlines for a search query, with the outlet name. "
+        "Headline and short blurb only, no article text."
+    )
+    settings = (
+        Setting("query", "Search terms; empty returns top stories.", ""),
+        Setting("limit", "Max items per fetch.", 30),
+        Setting("hl", "Interface language.", "en-US"),
+        Setting("gl", "Country edition.", "US"),
+        Setting("ceid", "Country:language edition id.", "US:en"),
+    )
 
     async def fetch(self) -> list[ContentItem]:
         from opensocial.sources.rss import fetch_feeds

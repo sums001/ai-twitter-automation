@@ -28,13 +28,6 @@
     "dup_threshold": 0.8,
     "dup_window_days": 2
   },
-  "prioritization": {
-    "recency_weight": 0.5,
-    "engagement_weight": 0.3,
-    "relevance_weight": 0.1,
-    "sentiment_weight": 0.1,
-    "half_life_hours": 18
-  },
   "sources": {
     "googlenews": {
       "query": "video games",
@@ -48,18 +41,5 @@
       "sort": "hot",
       "limit": 15
     }
-  },
-  "schedule": {
-    "windows": [
-      [
-        "09:00",
-        "21:00"
-      ]
-    ],
-    "posts_per_day": [
-      5,
-      5
-    ],
-    "min_gap_minutes": 20
   }
 }

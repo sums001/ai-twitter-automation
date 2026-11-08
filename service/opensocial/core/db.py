@@ -67,6 +67,59 @@ class ContentItemRow(Base):
     sentiment: Mapped[float | None] = mapped_column(Float)
     engagement: Mapped[dict | None] = mapped_column(JSON)
     raw_metadata: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    # The knowledge-base story this item was grouped into (NULL until ingested,
+    # or when it never passed any niche's filters).
+    story_id: Mapped[str | None] = mapped_column(String)
+
+
+class Story(Base):
+    """One real-world story in the shared knowledge base.
+
+    Several outlets reporting the same event are grouped into one story, so
+    coverage (how many distinct outlets ran it) becomes a ranking signal instead
+    of being thrown away as "duplicates". Stories are shared across workspaces;
+    whether a workspace already posted one lives in :class:`StoryUsage`.
+    """
+
+    __tablename__ = "stories"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    # The item that represents the story (highest-trust outlet): its URL is the
+    # one fetched for full text, its media the passthrough image.
+    best_item_id: Mapped[str | None] = mapped_column(String)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    outlets: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    # niche slug -> best relevance score among the story's items in that niche
+    niche_relevance: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    tokens: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    entities: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    trust: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    # ISO timestamps of the story's most recent items, for the momentum signal.
+    recent_item_times: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+
+
+class StoryUsage(Base):
+    """Per-workspace memory of a story: posted (``used``) or passed over.
+
+    ``times_shown`` counts how often the story made a workspace's shortlist
+    without being picked, so stories that keep losing fade instead of clogging
+    the top of every shortlist.
+    """
+
+    __tablename__ = "story_usage"
+
+    story_id: Mapped[str] = mapped_column(ForeignKey("stories.id"), primary_key=True)
+    platform_account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="shown")  # shown|used
+    times_shown: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_shown_at: Mapped[datetime | None] = mapped_column(DateTime)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime)
+    generated_post_id: Mapped[str | None] = mapped_column(String)
 
 
 class ContentItemNiche(Base):
@@ -116,6 +169,9 @@ class GeneratedPost(Base):
     content_item_id: Mapped[str | None] = mapped_column(
         ForeignKey("content_items.id")
     )
+    # The knowledge-base story the draft was written from (NULL for synthesis
+    # takes and legacy drafts). Regenerating re-reads this story's facts.
+    story_id: Mapped[str | None] = mapped_column(String)
     niche_slug: Mapped[str] = mapped_column(String, nullable=False)
     # The workspace (X account) that generated this draft. Niches are a shared
     # catalog, so this is what isolates one workspace's drafts from another's for
@@ -233,12 +289,24 @@ def make_engine(db_path: str | Path):
 # columns must be nullable / have a default) — there is no down-migration.
 _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("generated_posts", "platform_account_id", "VARCHAR"),
+    ("generated_posts", "story_id", "VARCHAR"),
+    ("content_items", "story_id", "VARCHAR"),
+]
+
+
+# Indexes for the columns the knowledge base and its cleanup filter on, so
+# per-tick queries stay fast however large the tables get. Idempotent.
+_INDEX_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("ix_stories_last_seen_at", "stories", "last_seen_at"),
+    ("ix_content_items_story_id", "content_items", "story_id"),
+    ("ix_content_items_fetched_at", "content_items", "fetched_at"),
+    ("ix_story_usage_account", "story_usage", "platform_account_id"),
+    ("ix_generated_posts_content_item_id", "generated_posts", "content_item_id"),
+    ("ix_logs_logged_at", "logs", "logged_at"),
 ]
 
 
 def _run_migrations(engine) -> None:
-    from sqlalchemy import text
-
     with engine.begin() as conn:
         for table, column, ddl_type in _COLUMN_MIGRATIONS:
             cols = {
@@ -249,6 +317,10 @@ def _run_migrations(engine) -> None:
                 conn.exec_driver_sql(
                     f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"
                 )
+        for name, table, column in _INDEX_MIGRATIONS:
+            conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})"
+            )
 
 
 def make_session_factory(db_path: str | Path) -> sessionmaker[Session]:
@@ -315,12 +387,14 @@ def insert_generated_post(
     priority_score: float | None = None,
     status: str = "draft",
     platform_account_id: str | None = None,
+    story_id: str | None = None,
 ) -> GeneratedPost:
     """Persist one draft post and return the ORM row (already flushed)."""
     now = _utcnow()
     post = GeneratedPost(
         id=uuid.uuid4().hex,
         content_item_id=content_item_id,
+        story_id=story_id,
         niche_slug=niche_slug,
         platform_account_id=platform_account_id,
         post_type=post_type,
@@ -339,20 +413,6 @@ def insert_generated_post(
     session.add(post)
     session.flush()
     return post
-
-
-def content_ids_with_posts(session: Session, niche_slug: str) -> set[str]:
-    """Content item ids that already have a draft for this niche.
-
-    Lets generation skip candidates it has already turned into a post.
-    """
-    rows = session.execute(
-        select(GeneratedPost.content_item_id).where(
-            GeneratedPost.niche_slug == niche_slug,
-            GeneratedPost.content_item_id.is_not(None),
-        )
-    ).all()
-    return {r[0] for r in rows}
 
 
 # ---------------------------------------------------------------------------
@@ -432,29 +492,29 @@ def published_today_count(
     return int(session.execute(stmt).scalar() or 0)
 
 
-def last_published_at(
-    session: Session,
-    niche_slug: str,
-    *,
-    platform_account_id: str | None = None,
+def last_published_for_account(
+    session: Session, platform_account_id: str | None
 ) -> datetime | None:
-    """Timestamp of the niche's most recent successful publish (for min-gap).
-
-    ``platform_account_id`` scopes to one workspace's publishes so the min-gap
-    throttle is per workspace — niches are shared, so two workspaces posting the
-    same niche must not throttle each other.
-    """
-    stmt = (
-        select(func.max(PostHistory.attempted_at))
-        .join(GeneratedPost, GeneratedPost.id == PostHistory.generated_post_id)
-        .where(
-            GeneratedPost.niche_slug == niche_slug,
-            PostHistory.status == "success",
-        )
+    """When this account last published successfully (any niche), for min-gap."""
+    stmt = select(func.max(PostHistory.attempted_at)).where(
+        PostHistory.status == "success"
     )
     if platform_account_id is not None:
         stmt = stmt.where(PostHistory.platform_account_id == platform_account_id)
-    return session.execute(stmt).scalar()
+    value = session.execute(stmt).scalar()
+    if value is not None and value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def pending_draft_count(session: Session, platform_account_id: str | None) -> int:
+    """Drafts awaiting review/publish for one account."""
+    stmt = select(func.count()).select_from(GeneratedPost).where(
+        GeneratedPost.status == "draft"
+    )
+    if platform_account_id is not None:
+        stmt = stmt.where(GeneratedPost.platform_account_id == platform_account_id)
+    return int(session.execute(stmt).scalar() or 0)
 
 
 def log(session: Session, level: str, message: str) -> None:
@@ -617,6 +677,12 @@ def delete_workspace(
         .filter(AppSetting.key.like(f"ws:{workspace_id}:%"))
         .delete(synchronize_session=False)
     )
+    # The shared story pool stays; only this workspace's used/shown memory goes.
+    deleted["story_usage"] = (
+        session.query(StoryUsage)
+        .filter(StoryUsage.platform_account_id == workspace_id)
+        .delete(synchronize_session=False)
+    )
 
     acct = session.get(PlatformAccount, workspace_id)
     if acct is not None:
@@ -680,6 +746,12 @@ def reset_workspace(
     deleted["app_settings"] = (
         session.query(AppSetting)
         .filter(AppSetting.key.like(f"ws:{workspace_id}:%"))
+        .delete(synchronize_session=False)
+    )
+    # The shared story pool stays; only this workspace's used/shown memory goes.
+    deleted["story_usage"] = (
+        session.query(StoryUsage)
+        .filter(StoryUsage.platform_account_id == workspace_id)
         .delete(synchronize_session=False)
     )
 
@@ -768,6 +840,8 @@ def reset_database(
     # Order matters: delete children before parents to respect FKs.
     tables = [
         ContentItemNiche,
+        StoryUsage,
+        Story,
         PostHistory,
         GeneratedPost,
         ContentItemRow,

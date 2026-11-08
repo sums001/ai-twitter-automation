@@ -1,189 +1,72 @@
-"""LLM semantic passes over the candidate queue (Phase 3 add-on).
+"""The one optional LLM ranking call: pick which shortlisted story to post.
 
-Two passes live here, both layered on top of the deterministic
-:func:`~opensocial.core.filtering.candidate_queue`:
+The knowledge base already ranks stories for free (``core/knowledge.py``).
+:func:`pick_story` only asks the model when that ranking has no clear winner:
+when the top story leads the runner-up by ``CLEAR_LEAD`` or more, or when
+running offline, the top story is taken as is. The prompt carries headlines
+plus the account's last few posts, roughly 250 tokens in and one number out.
 
-* :func:`rerank_by_importance` — the queue blends recency / relevance /
-  sentiment but has no sense of *significance*; this hands the top-K to the model
-  in **one call** and reorders them by importance.
-* :func:`choose_post_type` — picks the post **tone** that best fits an item, so
-  the tag matches the content instead of a random rotation slot.
-
-Both are no-ops without a real model — the offline :class:`TemplateProvider`
-(and a missing LiteLLM) fall straight back to the deterministic behavior, so
-tests and offline runs stay deterministic. Any parse/transport failure also
-falls back, so a bad model response never drops candidates or mis-tags a draft.
+Any model or parse failure falls back to the top story, so a misbehaving model
+never blocks a post.
 """
 
 from __future__ import annotations
 
 import re
 
-from opensocial.ai.prompts import (
-    build_image_query_messages,
-    build_posttype_messages,
-    build_ranking_messages,
-)
+from opensocial.ai.prompts import build_pick_messages
 from opensocial.ai.text import TextProvider
+from opensocial.core.knowledge import score_gap
 
-DEFAULT_TOP_K = 12
+# Relative score lead at which the free ranking decides on its own.
+CLEAR_LEAD = 0.15
+# How many shortlisted stories the model chooses between.
+PICK_FROM = 4
+
 _INT_RE = re.compile(r"\d+")
-# A short, comparable label per candidate for the ranking prompt.
-_SUMMARY_CHARS = 200
-# Keep only word characters when cleaning an LLM-written image query, and cap its
-# length so a chatty model reply can't become a long, no-match Unsplash search.
-_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9']+")
-_MAX_QUERY_WORDS = 4
 
 
-def _is_offline(provider: TextProvider) -> bool:
-    """The template provider can't reason about importance — skip it."""
+def is_offline(provider: TextProvider) -> bool:
+    """The template provider can't judge stories; it always takes the top one."""
     return getattr(provider, "name", "") == "template"
 
 
-def _item_label(candidate) -> str:
-    row = candidate.row
-    summary = (row.summary or row.body or "").strip().replace("\n", " ")
-    if summary:
-        return f"{row.title} — {summary[:_SUMMARY_CHARS]}"
-    return row.title
+def _label(scored) -> str:
+    n = scored.outlet_count
+    return f"{scored.story.title} ({n} outlets)" if n > 1 else scored.story.title
 
 
-def _parse_order(reply: str, n: int) -> list[int]:
-    """Parse a model reply into 0-based indices within ``range(n)``.
+def pick_story(
+    shortlisted: list,
+    *,
+    text_provider: TextProvider,
+    recent_posts: list[str] | None = None,
+    niche_names: list[str] | None = None,
+) -> tuple[object, str]:
+    """Return ``(winner, how)`` where ``how`` is ``"score"`` or ``"ai"``.
 
-    Pulls integers out of the reply (1-based, as prompted), converts to 0-based,
-    drops out-of-range and duplicate values. Returns ``[]`` on no usable ints.
+    ``shortlisted`` is best-first (:func:`~opensocial.core.knowledge.shortlist`).
     """
-    seen: list[int] = []
+    if not shortlisted:
+        raise ValueError("pick_story needs at least one story")
+    top = shortlisted[0]
+    if len(shortlisted) == 1 or is_offline(text_provider):
+        return top, "score"
+    if score_gap(shortlisted) >= CLEAR_LEAD:
+        return top, "score"
+
+    options = shortlisted[:PICK_FROM]
+    system, user = build_pick_messages(
+        niche_names=niche_names or [],
+        stories=[_label(s) for s in options],
+        recent_posts=recent_posts or [],
+    )
+    try:
+        reply = text_provider.generate(system, user)
+    except Exception:
+        return top, "score"
     for match in _INT_RE.findall(reply or ""):
         idx = int(match) - 1
-        if 0 <= idx < n and idx not in seen:
-            seen.append(idx)
-    return seen
-
-
-def rerank_by_importance(
-    candidates: list,
-    config: dict,
-    *,
-    text_provider: TextProvider,
-    niche_name: str | None = None,
-    top_k: int = DEFAULT_TOP_K,
-) -> list:
-    """Reorder ``candidates`` (best-first) by LLM-judged importance.
-
-    Only the top ``top_k`` are sent to the model; the tail keeps its
-    deterministic order and is appended unchanged. Any candidate the model
-    omits from its ranking is appended in its original deterministic position,
-    so the result is always a full permutation of the input.
-    """
-    if len(candidates) <= 1 or _is_offline(text_provider):
-        return candidates
-
-    head = candidates[:top_k]
-    tail = candidates[top_k:]
-
-    name = niche_name or (config or {}).get("display_name") or "this niche"
-    system, user = build_ranking_messages(
-        niche_name=name, items=[_item_label(c) for c in head]
-    )
-    try:
-        reply = text_provider.generate(system, user)
-    except Exception:
-        # A model/transport failure must never sink generation — keep order.
-        return candidates
-
-    order = _parse_order(reply, len(head))
-    if not order:
-        return candidates
-
-    ranked = [head[i] for i in order]
-    # Append any head items the model didn't mention, in their original order.
-    mentioned = set(order)
-    ranked.extend(head[i] for i in range(len(head)) if i not in mentioned)
-    ranked.extend(tail)
-    return ranked
-
-
-def _match_choice(reply: str, choices: list[str]) -> str | None:
-    """Return the first enabled tone named in the reply, or ``None``."""
-    text = (reply or "").lower()
-    for choice in choices:
-        if re.search(rf"\b{re.escape(choice.lower())}\b", text):
-            return choice
-    return None
-
-
-def choose_post_type(
-    candidate,
-    config: dict,
-    *,
-    text_provider: TextProvider,
-    choices: list[str],
-    niche_name: str | None = None,
-) -> str | None:
-    """Pick the enabled tone that best fits ``candidate``, or ``None``.
-
-    Returns ``None`` offline, when there's nothing to choose, or on any
-    model/parse failure — the caller then falls back to its rotation deck, so a
-    missing or misbehaving model never blocks generation.
-    """
-    if len(choices) <= 1 or _is_offline(text_provider):
-        return None
-
-    name = niche_name or (config or {}).get("display_name") or "this niche"
-    row = candidate.row
-    system, user = build_posttype_messages(
-        niche_name=name,
-        subject=row.title,
-        body=(row.summary or row.body or ""),
-        choices=choices,
-    )
-    try:
-        reply = text_provider.generate(system, user)
-    except Exception:
-        return None
-    return _match_choice(reply, choices)
-
-
-def _clean_image_query(reply: str) -> str | None:
-    """Reduce an LLM reply to a tight image query, or ``None`` if unusable.
-
-    Takes the first non-empty line, keeps word tokens only (dropping quotes and
-    punctuation a model might wrap the phrase in), and caps it at
-    ``_MAX_QUERY_WORDS`` so a verbose reply can't become a long, no-match search.
-    """
-    for line in (reply or "").splitlines():
-        words = _QUERY_TOKEN_RE.findall(line)
-        if words:
-            return " ".join(words[:_MAX_QUERY_WORDS])
-    return None
-
-
-def choose_image_query(
-    config: dict,
-    *,
-    text_provider: TextProvider,
-    niche_name: str,
-    subject: str,
-    body: str = "",
-) -> str | None:
-    """Ask the model for a concrete visual Unsplash query, or ``None``.
-
-    Returns ``None`` offline or on any model/parse failure — the caller then
-    falls back to the deterministic :func:`~opensocial.ai.prompts.unsplash_query`
-    heuristic, so a missing or misbehaving model never blocks image attachment.
-    """
-    if _is_offline(text_provider):
-        return None
-
-    name = niche_name or (config or {}).get("display_name") or "this niche"
-    system, user = build_image_query_messages(
-        niche_name=name, subject=subject, body=body
-    )
-    try:
-        reply = text_provider.generate(system, user)
-    except Exception:
-        return None
-    return _clean_image_query(reply)
+        if 0 <= idx < len(options):
+            return options[idx], "ai"
+    return top, "score"

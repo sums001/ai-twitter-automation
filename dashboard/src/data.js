@@ -44,8 +44,8 @@ export let NICHES = [
 // on the Settings → Actions tab. [command type, label, description].
 export const QUICK_ACTIONS = [
   ['fetch_sources', 'Fetch sources', 'pull fresh items from every enabled source'],
-  ['generate_posts', 'Generate posts', 'draft posts from today\'s candidate items'],
-  ['run_slots', 'Run due now', 'dispatch every posting slot due at this moment'],
+  ['generate_posts', 'Write a draft', 'write one post from the best unused story'],
+  ['run_slots', 'Post next now', 'publish the next post right away (within caps)'],
 ];
 
 const LABELS = { tech: 'Technology', ai: 'AI' };
@@ -110,13 +110,22 @@ export const LEVEL_COLORS = {
 };
 
 export const ROUTE_TITLES = {
-  dashboard: ['Dashboard', 'overview · all niches'],
-  niches: ['Niches', 'select & configure the niches you post in'],
-  queue: ['Queue', 'generated_posts pipeline'],
-  history: ['History', 'post_history & cost'],
-  sources: ['Sources', 'static & dynamic ingestion'],
-  rawdata: ['Raw Data', 'raw fetched content_items'],
-  schedule: ['Schedule', 'resolved posting slots'],
-  logs: ['Logs', 'live service tail'],
-  settings: ['Settings', 'safety & credentials'],
+  dashboard: ['Dashboard', 'today at a glance'],
+  niches: ['Niches', 'the topics this account posts about'],
+  queue: ['Queue', 'drafts waiting to be published'],
+  history: ['History', 'every publish attempt'],
+  sources: ['Sources', 'where the news comes from'],
+  rawdata: ['Raw Data', 'stories and fetched items'],
+  schedule: ['Schedule', 'when this account posts'],
+  logs: ['Logs', 'live worker output'],
+  settings: ['Settings', 'controls, AI and credentials'],
+};
+
+// Friendly names for worker commands (toasts, last-run lines).
+export const COMMAND_LABELS = {
+  fetch_sources: 'Fetch sources',
+  generate_posts: 'Write a draft',
+  run_slots: 'Post next now',
+  post_now: 'Post now',
+  regenerate_post: 'Regenerate draft',
 };

@@ -15,11 +15,9 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,10 +51,18 @@ from opensocial.core.db import (
     update_platform_account,
     upsert_source_status,
 )
-from opensocial.core.scheduler import ScheduleConfig, resolve_slots
+from opensocial.core.scheduler import (
+    Cadence,
+    get_next_post_at,
+    load_cadence,
+    projected_times,
+    save_cadence,
+    window_bounds,
+)
 from opensocial.core.settings import (
     get_followed_niches,
     get_schedule_timezone,
+    get_voice_samples,
     get_scoped_setting,
     has_scoped_secret,
     load_ai_config,
@@ -67,157 +73,50 @@ from opensocial.core.settings import (
     set_schedule_timezone,
     set_scoped_secret,
     set_scoped_setting,
+    set_voice_samples,
 )
+from opensocial.ai.text import AI_KEY_ENVS
+from opensocial.ai.text import PROVIDERS as AI_PROVIDERS
 from opensocial.sources import available_sources, get_source
 
 # ---------------------------------------------------------------------------
 # Source metadata for the dashboard
 # ---------------------------------------------------------------------------
-
-SOURCE_LABELS = {
-    "rss": "RSS",
-    "hackernews": "Hacker News",
-    "googlenews": "Google News",
-    "medium": "Medium",
-    "devto": "dev.to",
-    "github_releases": "GitHub Releases",
-    "arxiv": "arXiv",
-    "nasa": "NASA",
-    "yfinance": "yfinance",
-    "reddit": "Reddit",
-    "youtube": "YouTube",
-    "producthunt": "Product Hunt",
-    "guardian": "The Guardian",
-}
-
-# source -> (env var names, "required" | "optional")
-SOURCE_KEYS: dict[str, tuple[tuple[str, ...], str]] = {
-    "guardian": (("GUARDIAN_API_KEY",), "required"),
-    "youtube": (("YOUTUBE_API_KEY",), "required"),
-    "producthunt": (("PRODUCTHUNT_TOKEN",), "required"),
-    "github_releases": (("GITHUB_TOKEN",), "optional"),
-    "nasa": (("NASA_API_KEY",), "optional"),
-}
-
-# Sources shown in the dashboard but not yet usable: surfaced with an "upcoming"
-# badge and a locked enable toggle. Remove an entry here to make it usable.
-UPCOMING_SOURCES: frozenset[str] = frozenset({"youtube"})
-
-# Dynamic sources take a user-supplied origin URL (feed / subreddit / channel)
-# that maps into a niche's per-source config list. Everything else is "static":
-# a fixed origin that simply runs for whatever niches reference it. ``key`` is
-# the niche-config list the parsed origin is appended to; ``label`` drives the
-# dashboard's add-origin input; ``defaults`` seed a freshly-created source block.
-ORIGIN_SPEC: dict[str, dict] = {
-    "reddit": {
-        "key": "subreddits",
-        "label": "subreddit URL or name",
-        "defaults": {"sort": "hot", "limit": 25},
-        "max_origins": 10,
-    },
-    "youtube": {
-        "key": "channel_ids",
-        "label": "YouTube channel URL (/channel/UC…)",
-        "defaults": {"limit": 10, "transcripts": True},
-    },
-    "rss": {
-        "key": "feeds",
-        "label": "RSS / Atom feed URL",
-        "defaults": {},
-    },
-}
-DYNAMIC_SOURCES = set(ORIGIN_SPEC)
-
-# Per-source ceiling on user-added origins (subreddits / feeds / channels).
-# Sources may override via ``ORIGIN_SPEC[name]["max_origins"]``.
-MAX_ORIGINS = 20
+# Every source describes itself (label, auth, key envs, origin spec) on its
+# plugin class — see ``opensocial.sources.base.Source``. Nothing here repeats it.
 
 
-def _max_origins(name: str) -> int:
-    return ORIGIN_SPEC.get(name, {}).get("max_origins", MAX_ORIGINS)
-
-
-def _parse_reddit_origin(value: str) -> str | None:
-    """Extract a subreddit name from a URL, an ``r/name``, or a bare name."""
-    s = value.strip().rstrip("/")
-    m = re.search(r"reddit\.com/r/([A-Za-z0-9_]+)", s, re.I)
-    if m:
-        return m.group(1)
-    m = re.fullmatch(r"(?:r/)?([A-Za-z0-9_]+)", s)
-    return m.group(1) if m else None
-
-
-def _parse_youtube_origin(value: str) -> str | None:
-    """Extract a channel id (``UC…``) when present, else the handle/name as-is.
-
-    Note: ``@handle`` / ``/c/`` / ``/user/`` URLs aren't resolvable to a channel
-    id without the Data API, so they're stored verbatim — prefer ``/channel/UC…``
-    URLs for reliable fetching.
-    """
-    s = value.strip().rstrip("/")
-    m = re.search(r"/channel/(UC[\w-]+)", s)
-    if m:
-        return m.group(1)
-    m = re.search(r"(UC[\w-]{20,})", s)
-    if m:
-        return m.group(1)
-    m = re.search(r"/(@[\w.-]+)", s) or re.search(r"/(?:c|user)/([\w.-]+)", s)
-    if m:
-        return m.group(1)
-    return s or None
-
-
-def _parse_rss_origin(value: str) -> str | None:
-    """RSS origins are stored verbatim (the feed URL)."""
-    s = value.strip()
-    return s or None
-
-
-_ORIGIN_PARSERS = {
-    "reddit": _parse_reddit_origin,
-    "youtube": _parse_youtube_origin,
-    "rss": _parse_rss_origin,
-}
-
-
-def _parse_origin(name: str, value: str) -> str | None:
-    parser = _ORIGIN_PARSERS.get(name)
-    return parser(value) if parser else None
-
-
-def _origin_display(name: str, value: str) -> str:
-    """A human label for an origin (``r/bitcoin``, a netloc, the channel id)."""
-    if name == "reddit":
-        return f"r/{value}"
-    if name == "rss":
-        netloc = urlparse(value).netloc
-        return netloc or value
-    return value
+def _origin_source(name: str):
+    """The plugin class for ``name`` if it takes user-added origins, else None."""
+    cls = get_source(name)
+    return cls if cls.origin_key else None
 
 
 # Credential groups for the Settings → Credentials tab. X is special-cased
-# (stored as an encrypted platform account, not env secrets).
+# (stored as an encrypted platform account, not env secrets). Source keys are
+# derived from the registry, so adding a keyed source needs no change here.
 CREDENTIAL_GROUPS: list[tuple[str, tuple[str, ...]]] = [
-    ("OpenAI", ("OPENAI_API_KEY",)),
-    ("Anthropic", ("ANTHROPIC_API_KEY",)),
-    ("YouTube", ("YOUTUBE_API_KEY",)),
-    ("Product Hunt", ("PRODUCTHUNT_TOKEN",)),
-    ("The Guardian", ("GUARDIAN_API_KEY",)),
-    ("NASA", ("NASA_API_KEY",)),
-    ("GitHub", ("GITHUB_TOKEN",)),
+    *(
+        (spec["label"], (spec["key_env"],))
+        for spec in AI_PROVIDERS.values()
+        if spec["key_env"]
+    ),
+    *(
+        (get_source(n).label or n, get_source(n).key_envs)
+        for n in available_sources()
+        if get_source(n).key_envs
+    ),
     ("Unsplash", ("UNSPLASH_ACCESS_KEY",)),
 ]
 
 ALLOWED_SECRET_ENVS = {env for _, envs in CREDENTIAL_GROUPS for env in envs}
 
-# AI provider keys surfaced inline on the AI providers card (set/not-set).
-AI_KEY_ENVS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
-
 # Per-workspace credential keys (stored under ``ws:<id>:secret:<ENV>``, never
 # injected into ``os.environ``) whose set/not-set status the dashboard surfaces
-# via ``/api/ai``. AI keys authenticate text generation; Unsplash authenticates
-# image lookups for niches whose image source is Unsplash. The *source* API keys
-# (YouTube, Guardian, NASA…) stay global — set on the Sources tab.
+# via ``/api/ai``. AI keys (one per provider in ``ai.text.PROVIDERS``)
+# authenticate text generation; Unsplash authenticates image lookups for niches
+# whose image source is Unsplash. The *source* API keys (YouTube, Guardian…)
+# stay global.
 WORKSPACE_KEY_ENVS = (*AI_KEY_ENVS, "UNSPLASH_ACCESS_KEY")
 
 COMMAND_TYPES = {
@@ -229,6 +128,12 @@ COMMAND_TYPES = {
 }
 
 _NICHE_PREFIX = re.compile(r"^\[([a-z0-9_-]+)\]\s*", re.I)
+
+
+def _story_ttl(session) -> int:
+    from opensocial.core.knowledge import story_ttl_hours
+
+    return story_ttl_hours(session)
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -284,8 +189,9 @@ def inject_stored_secrets(session_factory) -> int:
 class SettingsPatch(BaseModel):
     dry_run: bool | None = None
     app_mode: str | None = None
-    global_daily_cap: int | None = None
-    autopilot_fetch_minutes: int | None = None
+    global_daily_cap: int | None = None  # install-wide backstop (0 = none)
+    max_post_attempts: int | None = None  # publish retries before a draft fails
+    story_ttl_hours: int | None = None  # forget unused stories after this long
 
 
 class ResetIn(BaseModel):
@@ -352,16 +258,16 @@ class AccountPatch(BaseModel):
     clear_cap: bool = False  # set daily_post_cap back to unlimited
 
 
-class SchedulePut(BaseModel):
-    windows: list[list[str]]
-    posts_per_day: list[int]
-    min_gap_minutes: int
+class CadencePut(BaseModel):
+    window: list[str]  # ["HH:MM", "HH:MM"]: the account's daily posting window
+    every_minutes: int  # one post roughly this often inside the window
+    jitter_pct: int = 20  # each gap randomized by ± this percent
+    min_gap_minutes: int = 20  # safety: never two posts closer than this
+    max_pending_drafts: int | None = None  # ignored (removed); accepted for old clients
 
 
-class RandomizeIn(BaseModel):
-    window: list[str]  # ["HH:MM", "HH:MM"] — posting time range for the day
-    total_posts: int  # total posts/day, split randomly across scheduled niches
-    min_gap_minutes: int | None = None
+class VoiceIn(BaseModel):
+    samples: list[str]
 
 
 class TimezonePut(BaseModel):
@@ -458,11 +364,12 @@ def create_app(
             if account:
                 q = q.where(GeneratedPost.platform_account_id == account)
             queue_pending = s.execute(q).scalar()
+            ttl = _story_ttl(s)
         return {
             "dry_run": settings.dry_run,
             "app_mode": settings.app_mode,
             "global_daily_cap": settings.global_daily_cap,
-            "autopilot_fetch_minutes": settings.autopilot_fetch_minutes,
+            "story_ttl_hours": ttl,
             "max_post_attempts": settings.max_post_attempts,
             "secret_key_set": bool(settings.secret_key),
             "published_today": published,
@@ -471,20 +378,30 @@ def create_app(
 
     @app.patch("/api/settings")
     def patch_settings(patch: SettingsPatch, account: str | None = None):
-        # dry_run / app_mode are per workspace; fetch cadence stays global.
+        # dry_run / app_mode are per workspace (the cadence is on /api/schedule).
         with session_factory() as s:
             if patch.dry_run is not None:
                 set_scoped_setting(s, account, "dry_run", "true" if patch.dry_run else "false")
+            if patch.story_ttl_hours is not None:
+                from opensocial.core.knowledge import set_story_ttl_hours
+
+                try:
+                    set_story_ttl_hours(s, patch.story_ttl_hours)
+                except ValueError as e:
+                    raise HTTPException(422, str(e))
             if patch.app_mode is not None:
                 if patch.app_mode not in ("manual", "auto"):
                     raise HTTPException(422, "app_mode must be 'manual' or 'auto'")
                 set_scoped_setting(s, account, "app_mode", patch.app_mode)
-            if patch.autopilot_fetch_minutes is not None:
-                if patch.autopilot_fetch_minutes < 0:
-                    raise HTTPException(422, "autopilot_fetch_minutes must be >= 0")
-                set_app_setting(
-                    s, "autopilot_fetch_minutes", str(patch.autopilot_fetch_minutes)
-                )
+            # Install-wide limits (not per workspace).
+            if patch.global_daily_cap is not None:
+                if not 0 <= patch.global_daily_cap <= 1000:
+                    raise HTTPException(422, "global_daily_cap must be between 0 and 1000")
+                set_app_setting(s, "global_daily_cap", str(patch.global_daily_cap))
+            if patch.max_post_attempts is not None:
+                if not 1 <= patch.max_post_attempts <= 10:
+                    raise HTTPException(422, "max_post_attempts must be between 1 and 10")
+                set_app_setting(s, "max_post_attempts", str(patch.max_post_attempts))
         return status(account)
 
     @app.post("/api/reset")
@@ -662,6 +579,164 @@ def create_app(
             },
         }
 
+    @app.get("/api/dashboard")
+    def dashboard_stats(account: str | None = None, days: int = 14):
+        """Totals, daily series and breakdowns for the dashboard's charts.
+
+        Stories and content are shared across workspaces (one fetch serves all),
+        so their counts are global; drafts and publishes are scoped to
+        ``account``. Daily buckets are UTC dates, oldest first.
+        """
+        from opensocial.core.db import Story
+        from opensocial.core.knowledge import shortlist
+
+        days = max(1, min(days, 90))
+        today_start, _ = _today_bounds()
+        since = today_start - timedelta(days=days - 1)
+        week_ago = today_start - timedelta(days=6)
+
+        def by_day(col, stmt):
+            day = func.date(col)
+            rows = s.execute(stmt.add_columns(day, func.count()).where(col >= since).group_by(day)).all()
+            return {str(d): int(n) for d, n in rows}
+
+        def scoped(stmt, model):
+            return stmt.where(model.platform_account_id == account) if account else stmt
+
+        def count(stmt):
+            return int(s.execute(stmt).scalar() or 0)
+
+        with session_factory() as s:
+            selected = get_followed_niches(s, account)
+
+            items_day = by_day(ContentItemRow.fetched_at, select())
+            stories_day = by_day(Story.first_seen_at, select())
+            drafts_day = by_day(
+                GeneratedPost.created_at, scoped(select(), GeneratedPost)
+            )
+            pub_day = by_day(
+                PostHistory.attempted_at,
+                scoped(select().where(PostHistory.status == "success"), PostHistory),
+            )
+
+            stories_total = count(select(func.count()).select_from(Story))
+            items_total = count(select(func.count()).select_from(ContentItemRow))
+            published_total = count(
+                scoped(
+                    select(func.count()).select_from(PostHistory).where(PostHistory.status == "success"),
+                    PostHistory,
+                )
+            )
+            status_rows = s.execute(
+                scoped(select(GeneratedPost.status, func.count()), GeneratedPost).group_by(GeneratedPost.status)
+            ).all()
+
+            by_source = [
+                {"name": n, "items": int(c)}
+                for n, c in s.execute(
+                    select(ContentItemRow.source_name, func.count())
+                    .where(ContentItemRow.fetched_at >= week_ago)
+                    .group_by(ContentItemRow.source_name)
+                    .order_by(func.count().desc())
+                ).all()
+            ]
+
+            # Per-niche, last 7 days.
+            niche_items = dict(
+                s.execute(
+                    select(ContentItemNiche.niche_slug, func.count())
+                    .join(ContentItemRow, ContentItemRow.id == ContentItemNiche.content_item_id)
+                    .where(ContentItemRow.fetched_at >= week_ago)
+                    .group_by(ContentItemNiche.niche_slug)
+                ).all()
+            )
+            niche_drafts = dict(
+                s.execute(
+                    scoped(select(GeneratedPost.niche_slug, func.count()), GeneratedPost)
+                    .where(GeneratedPost.created_at >= week_ago)
+                    .group_by(GeneratedPost.niche_slug)
+                ).all()
+            )
+            niche_pub = dict(
+                s.execute(
+                    scoped(
+                        select(GeneratedPost.niche_slug, func.count())
+                        .join(PostHistory, PostHistory.generated_post_id == GeneratedPost.id)
+                        .where(PostHistory.status == "success", PostHistory.attempted_at >= week_ago),
+                        PostHistory,
+                    ).group_by(GeneratedPost.niche_slug)
+                ).all()
+            )
+            niche_stories: dict[str, int] = {}
+            for rel in s.execute(
+                select(Story.niche_relevance).where(Story.first_seen_at >= week_ago)
+            ).scalars():
+                for slug in (rel or {}):
+                    niche_stories[slug] = niche_stories.get(slug, 0) + 1
+
+            top = []
+            if selected:
+                try:
+                    ranked = shortlist(s, account, selected, k=6)
+                except Exception:  # knowledge base unavailable → just omit the list
+                    ranked = []
+                top = [
+                    {
+                        "id": sc.story.id,
+                        "title": sc.story.title,
+                        "niche": sc.niche_slug,
+                        "outlets": len(sc.story.outlets or []),
+                        "items": sc.story.item_count,
+                        "first_seen": _iso(sc.story.first_seen_at),
+                        "score": round(sc.score, 3),
+                    }
+                    for sc in ranked
+                ]
+
+        names = {n.slug: n.display_name for n in niches()}
+        by_niche = [
+            {
+                "slug": slug,
+                "display_name": names.get(slug, slug),
+                "stories": niche_stories.get(slug, 0),
+                "items": int(niche_items.get(slug, 0)),
+                "drafts": int(niche_drafts.get(slug, 0)),
+                "published": int(niche_pub.get(slug, 0)),
+            }
+            for slug in selected
+        ]
+        by_niche.sort(key=lambda r: (-r["stories"], -r["items"]))
+
+        daily = []
+        for i in range(days):
+            d = (since + timedelta(days=i)).date().isoformat()
+            daily.append(
+                {
+                    "date": d,
+                    "items": items_day.get(d, 0),
+                    "stories": stories_day.get(d, 0),
+                    "drafts": drafts_day.get(d, 0),
+                    "published": pub_day.get(d, 0),
+                }
+            )
+        today = daily[-1]
+        return {
+            "totals": {
+                "stories": stories_total,
+                "stories_today": today["stories"],
+                "items": items_total,
+                "items_today": today["items"],
+                "published": published_total,
+                "published_today": today["published"],
+                "drafts_today": today["drafts"],
+            },
+            "daily": daily,
+            "post_status": {str(k): int(v) for k, v in status_rows},
+            "by_source": by_source,
+            "by_niche": by_niche,
+            "top_stories": top,
+        }
+
     # ---- niches ------------------------------------------------------------
 
     @app.get("/api/niches")
@@ -726,72 +801,7 @@ def create_app(
         write_niche(path, config)
         return config
 
-    @app.put("/api/niches/{slug}/schedule")
-    def put_schedule(slug: str, sched: SchedulePut):
-        data, path = niche_or_404(slug)
-        for win in sched.windows:
-            if len(win) != 2 or not all(re.fullmatch(r"\d{2}:\d{2}", w) for w in win):
-                raise HTTPException(422, f"bad window {win!r} (use ['HH:MM','HH:MM'])")
-        if len(sched.posts_per_day) != 2:
-            raise HTTPException(422, "posts_per_day must be [min, max]")
-        data["schedule"] = {
-            "windows": sched.windows,
-            "posts_per_day": sched.posts_per_day,
-            "min_gap_minutes": sched.min_gap_minutes,
-        }
-        write_niche(path, data)
-        return data["schedule"]
-
-    @app.delete("/api/niches/{slug}/schedule")
-    def delete_schedule(slug: str):
-        """Take a niche off the schedule (drop its ``schedule`` block)."""
-        data, path = niche_or_404(slug)
-        if "schedule" in data:
-            del data["schedule"]
-            write_niche(path, data)
-        return {"ok": True, "slug": slug}
-
-    @app.post("/api/schedule/randomize")
-    def randomize_schedule(body: RandomizeIn):
-        """Randomly spread a daily post total across the scheduled niches.
-
-        The total is split as a random multinomial draw over the niches that
-        are currently on the schedule; each niche's windows are set to the
-        given posting time range and its ``posts_per_day`` to its share.
-        """
-        win = body.window
-        if len(win) != 2 or not all(re.fullmatch(r"\d{2}:\d{2}", w) for w in win):
-            raise HTTPException(422, "window must be ['HH:MM','HH:MM']")
-        if win[0] >= win[1]:
-            raise HTTPException(422, "window start must be before end")
-        if body.total_posts < 0:
-            raise HTTPException(422, "total_posts must be >= 0")
-
-        scheduled = [n for n in niches() if (n.raw or {}).get("schedule")]
-        if not scheduled:
-            raise HTTPException(400, "no niches on the schedule to randomize")
-
-        slugs = [n.slug for n in scheduled]
-        shares = {slug: 0 for slug in slugs}
-        for _ in range(body.total_posts):
-            shares[random.choice(slugs)] += 1
-
-        for n in scheduled:
-            data, path = niche_or_404(n.slug)
-            existing = data.get("schedule") or {}
-            gap = body.min_gap_minutes
-            if gap is None:
-                gap = int(existing.get("min_gap_minutes", 45))
-            share = shares[n.slug]
-            data["schedule"] = {
-                "windows": [list(win)],
-                "posts_per_day": [share, share],
-                "min_gap_minutes": int(gap),
-            }
-            write_niche(path, data)
-        return schedule()
-
-    # ---- schedule (resolved slots) ------------------------------------------
+    # ---- schedule (per-account cadence) ---------------------------------------
 
     @app.get("/api/schedule/timezone")
     def get_timezone():
@@ -810,48 +820,202 @@ def create_app(
             s.commit()
         return {"timezone": tz}
 
+    def _today_activity(s, account: str | None, start, end) -> list[dict]:
+        stmt = (
+            select(GeneratedPost, PostHistory.attempted_at)
+            .join(PostHistory, PostHistory.generated_post_id == GeneratedPost.id)
+            .where(
+                PostHistory.status == "success",
+                PostHistory.attempted_at >= start,
+                PostHistory.attempted_at < end,
+            )
+            .order_by(PostHistory.attempted_at)
+        )
+        if account:
+            stmt = stmt.where(PostHistory.platform_account_id == account)
+        return [
+            {
+                "at": _iso(at),
+                "niche": post.niche_slug,
+                "type": post.post_type,
+                "text": post.text,
+                "post_id": post.id,
+            }
+            for post, at in s.execute(stmt).all()
+        ]
+
     @app.get("/api/schedule")
     def schedule(account: str | None = None):
+        """The account's cadence, next post time and today's posting timeline."""
         now = datetime.now(timezone.utc)
-        out = []
-        scoped = account_niche_slugs(account)  # this workspace's followed niches
         with session_factory() as s:
             tz_name = get_schedule_timezone(s)
             tz = resolve_tz(tz_name)
-            for n in niches():
-                # Only niches that have a schedule block are "on the schedule".
-                if not (n.raw or {}).get("schedule"):
-                    continue
-                # Shared catalog: a workspace's schedule is its followed niches.
-                if scoped is not None and n.slug not in scoped:
-                    continue
-                cfg = ScheduleConfig.from_niche(n.raw)
-                slots = resolve_slots(cfg, n.slug, now, tz=tz)
-                # "due" here is purely informational for the schedule view: how
-                # many of today's slots have elapsed (the engine no longer catches
-                # these up — only slots that *just* came due publish).
-                due = sum(1 for t in slots if t <= now)
-                published = published_today_count(
-                    s, niche_slug=n.slug, platform_account_id=account, day=now
-                )
-                out.append(
+            cadence = load_cadence(s, account, config_dir=config_dir)
+            settings = resolve_settings(s, account)
+            next_at = get_next_post_at(s, account) if account else None
+            win_start, win_end = window_bounds(cadence, now, tz)
+            day_start = win_start.replace(hour=0, minute=0).astimezone(timezone.utc)
+            day_end = day_start + timedelta(days=1)
+            posted = _today_activity(s, account, day_start, day_end)
+            pending_q = select(func.count()).select_from(GeneratedPost).where(
+                GeneratedPost.status == "draft"
+            )
+            if account:
+                pending_q = pending_q.where(GeneratedPost.platform_account_id == account)
+            pending = int(s.execute(pending_q).scalar() or 0)
+            acct = get_platform_account(s, account) if account else None
+            followed = get_followed_niches(s, account) if account else []
+            if next_at is not None and next_at < now - timedelta(hours=12):
+                next_at = None  # left over from an earlier day; the worker re-rolls it
+            state, message = "ok", ""
+            if account:
+                from opensocial.core.autopilot import schedule_status, workspace_context
+
+                ctx = workspace_context(s, account, config_dir)
+                if ctx is not None:
+                    state, message = schedule_status(s, ctx, now=now, next_at=next_at)
+        today = now.astimezone(tz).date()
+
+        def when(t: datetime) -> dict:
+            local = t.astimezone(tz)
+            return {
+                "at": _iso(t),
+                "day": (local.date() - today).days,  # 0 = today, 1 = tomorrow
+                "minute": local.hour * 60 + local.minute,  # minute of day in the schedule tz
+            }
+
+        upcoming = [
+            when(t) for t in projected_times(cadence, next_at, now, tz)
+            if t >= now - timedelta(minutes=1)
+        ]
+        caps = [c for c in ((acct.daily_post_cap if acct else None), settings.global_daily_cap) if c and c > 0]
+        return {
+            "now": _iso(now),
+            "now_minute": now.astimezone(tz).hour * 60 + now.astimezone(tz).minute,
+            "timezone": tz_name,
+            "cadence": cadence.to_dict(),
+            "mode": settings.app_mode,
+            "dry_run": settings.dry_run,
+            "next_post_at": _iso(next_at),
+            "next_post": when(next_at) if next_at else None,
+            "status": {"state": state, "message": message},
+            "window_today": [_iso(win_start), _iso(win_end)],
+            "upcoming": upcoming,
+            "posted_today": [
+                {**p, "minute": when(datetime.fromisoformat(p["at"]))["minute"]} for p in posted
+            ],
+            "pending_drafts": pending,
+            "daily_cap": acct.daily_post_cap if acct is not None else None,
+            "global_daily_cap": settings.global_daily_cap,
+            "effective_cap": min(caps) if caps else None,
+            "followed_niches": followed,
+        }
+
+    @app.put("/api/schedule")
+    def put_schedule(body: CadencePut, account: str | None = None):
+        """Save the account's window and rhythm; the next post time re-rolls."""
+        win = body.window
+        if len(win) != 2 or not all(re.fullmatch(r"\d{2}:\d{2}", w) for w in win):
+            raise HTTPException(422, "window must be ['HH:MM','HH:MM']")
+        cadence = Cadence(
+            window=(win[0], win[1]),
+            every_minutes=body.every_minutes,
+            jitter_pct=body.jitter_pct,
+            min_gap_minutes=body.min_gap_minutes,
+        )
+        with session_factory() as s:
+            try:
+                save_cadence(s, account, cadence)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+        return schedule(account)
+
+    # ---- voice samples -------------------------------------------------------
+
+    @app.get("/api/voice")
+    def get_voice(account: str | None = None):
+        """The account's voice samples (real posts the writer imitates)."""
+        with session_factory() as s:
+            samples, is_default = get_voice_samples(s, account)
+        return {"samples": samples, "default": is_default}
+
+    @app.put("/api/voice")
+    def put_voice(body: VoiceIn, account: str | None = None):
+        with session_factory() as s:
+            saved = set_voice_samples(s, account, body.samples)
+        return {"samples": saved, "default": False}
+
+    @app.delete("/api/voice")
+    def reset_voice(account: str | None = None):
+        """Forget the account's own samples and go back to the defaults."""
+        from opensocial.core.db import AppSetting
+
+        key = f"ws:{account}:voice_samples" if account else "voice_samples"
+        with session_factory() as s:
+            row = s.get(AppSetting, key)
+            if row is not None:
+                s.delete(row)
+                s.commit()
+        return get_voice(account)
+
+    # ---- knowledge base ------------------------------------------------------
+
+    @app.get("/api/stories")
+    def stories(account: str | None = None, niche: str | None = None, limit: int = 40):
+        """The knowledge base as this account sees it: the scored shortlist
+        (unused stories, best first) plus recently used ones."""
+        from opensocial.core.db import Story, StoryUsage
+        from opensocial.core.knowledge import shortlist
+
+        with session_factory() as s:
+            slugs = [niche] if niche else (get_followed_niches(s, account) if account else [])
+            if not slugs:
+                slugs = [n.slug for n in niches()]
+            ranked = shortlist(s, account, slugs, k=max(1, min(limit, 200)))
+            used = []
+            if account:
+                rows = s.execute(
+                    select(Story, StoryUsage)
+                    .join(StoryUsage, StoryUsage.story_id == Story.id)
+                    .where(
+                        StoryUsage.platform_account_id == account,
+                        StoryUsage.status == "used",
+                    )
+                    .order_by(StoryUsage.used_at.desc())
+                    .limit(20)
+                ).all()
+                used = [
                     {
-                        "slug": n.slug,
-                        "display_name": n.display_name,
-                        "enabled": n.enabled,
-                        "windows": [
-                            [w[0].strftime("%H:%M"), w[1].strftime("%H:%M")]
-                            for w in cfg.windows
-                        ],
-                        "posts_per_day": list(cfg.posts_per_day),
-                        "min_gap_minutes": cfg.min_gap_minutes,
-                        "slots": [_iso(t) for t in slots],
-                        "due": due,
-                        "published_today": published,
-                        "owes": max(0, due - published) if n.enabled else 0,
+                        "id": st.id,
+                        "title": st.title,
+                        "outlets": st.outlets,
+                        "used_at": _iso(u.used_at),
+                        "post_id": u.generated_post_id,
                     }
-                )
-        return {"now": _iso(now), "timezone": tz_name, "niches": out}
+                    for st, u in rows
+                ]
+            total = s.execute(select(func.count()).select_from(Story)).scalar() or 0
+            return {
+                "total_stories": int(total),
+                "story_ttl_hours": _story_ttl(s),
+                "niches": slugs,
+                "shortlist": [
+                    {
+                        "id": sc.story.id,
+                        "title": sc.story.title,
+                        "summary": sc.story.summary,
+                        "niche": sc.niche_slug,
+                        "outlets": sc.story.outlets,
+                        "items": sc.story.item_count,
+                        "first_seen": _iso(sc.story.first_seen_at),
+                        "score": sc.score,
+                        "signals": {k: round(v, 3) for k, v in sc.signals.items()},
+                    }
+                    for sc in ranked
+                ],
+                "used": used,
+            }
 
     # ---- posts (queue) -------------------------------------------------------
 
@@ -1099,22 +1263,25 @@ def create_app(
     @app.get("/api/sources")
     def sources():
         all_niches = niches()
+        names = available_sources()
         usage: dict[str, dict] = {}
-        origins: dict[str, list] = {name: [] for name in ORIGIN_SPEC}
+        origins: dict[str, list] = {name: [] for name in names}
         for n in all_niches:
             for name, scfg in n.sources.items():
+                if name not in origins:
+                    continue  # stale niche entry for a removed source
                 u = usage.setdefault(name, {"niches": [], "enabled_in": 0})
                 u["niches"].append(n.slug)
                 if scfg.get("enabled") is not False and n.enabled:
                     u["enabled_in"] += 1
-                spec = ORIGIN_SPEC.get(name)
-                if spec:
-                    for value in scfg.get(spec["key"]) or []:
+                cls = _origin_source(name)
+                if cls:
+                    for value in scfg.get(cls.origin_key) or []:
                         origins[name].append(
                             {
                                 "niche": n.slug,
                                 "value": value,
-                                "display": _origin_display(name, value),
+                                "display": cls.origin_display(value),
                             }
                         )
 
@@ -1122,33 +1289,29 @@ def create_app(
             statuses = source_statuses(s)
 
         out = []
-        for name in available_sources():
+        for name in names:
+            cls = get_source(name)
             row = statuses.get(name)
-            envs, requirement = SOURCE_KEYS.get(name, ((), None))
-            key_set = all(os.environ.get(e) for e in envs) if envs else None
             u = usage.get(name, {"niches": [], "enabled_in": 0})
-            kind = "dynamic" if name in DYNAMIC_SOURCES else "static"
+            has_origins = bool(cls.origin_key)
+            key_set = cls.key_available() if cls.key_envs else None
             out.append(
                 {
-                    "id": name,
-                    "name": SOURCE_LABELS.get(name, name),
-                    "kind": kind,
-                    "upcoming": name in UPCOMING_SOURCES,
-                    "category": getattr(get_source(name), "category", None),
+                    **cls.describe(),
+                    "kind": "dynamic" if has_origins else "static",
                     "enabled": row.enabled_globally if row is not None else False,
                     "last_fetch_at": _iso(row.last_fetch_at) if row is not None else None,
                     "last_status": row.last_fetch_status if row is not None else None,
                     "ok": (row.last_fetch_status or "ok").startswith("ok")
                     if row is not None
                     else True,
-                    "key": requirement,
-                    "key_envs": list(envs),
+                    # back-compat: "required" | "optional" | None
+                    "key": None if cls.auth == "none" else cls.auth,
                     "key_set": key_set,
+                    "needs_key": cls.missing_required_key(),
                     "niches": u["niches"],
                     "enabled_in": u["enabled_in"],
-                    "origin_label": ORIGIN_SPEC[name]["label"] if kind == "dynamic" else None,
-                    "origins": origins.get(name, []) if kind == "dynamic" else [],
-                    "max_origins": _max_origins(name) if kind == "dynamic" else None,
+                    "origins": origins[name] if has_origins else [],
                 }
             )
         return out
@@ -1157,103 +1320,104 @@ def create_app(
     def patch_source(name: str, patch: SourcePatch):
         if name not in available_sources():
             raise HTTPException(404, f"unknown source {name!r}")
-        if patch.enabled and name in UPCOMING_SOURCES:
+        if patch.enabled and get_source(name).upcoming:
             raise HTTPException(409, f"{name!r} is upcoming and can't be enabled yet")
         with session_factory() as s:
             row = upsert_source_status(s, name, enabled=patch.enabled)
             return {"id": name, "enabled": row.enabled_globally}
 
-    def _origin_add(niche_slug: str, name: str, spec: dict, value: str) -> None:
+    def _origin_add(niche_slug: str, cls, value: str) -> None:
         """Append a parsed origin to a niche's source block (seeding it if new)."""
         data, path = niche_or_404(niche_slug)
         sources = data.setdefault("sources", {})
-        block = sources.get(name)
+        block = sources.get(cls.name)
         if not isinstance(block, dict):
-            block = dict(spec["defaults"])
-            if name == "rss":
+            block = dict(cls.origin_defaults)
+            if any(st.name == "category" for st in cls.settings):
                 block.setdefault("category", niche_slug)
-            sources[name] = block
-        lst = block.setdefault(spec["key"], [])
+            sources[cls.name] = block
+        lst = block.setdefault(cls.origin_key, [])
         if value not in lst:
             lst.append(value)
         write_niche(path, data)
 
-    def _origin_remove(niche_slug: str, name: str, spec: dict, value: str) -> None:
+    def _origin_remove(niche_slug: str, cls, value: str) -> None:
         """Remove an origin from a niche, dropping the block once it's empty."""
         data, path = niche_or_404(niche_slug)
-        block = (data.get("sources") or {}).get(name)
+        block = (data.get("sources") or {}).get(cls.name)
         if not isinstance(block, dict):
             return
-        lst = block.get(spec["key"]) or []
+        lst = block.get(cls.origin_key) or []
         if value in lst:
             lst.remove(value)
         if lst:
-            block[spec["key"]] = lst
+            block[cls.origin_key] = lst
         else:
-            data["sources"].pop(name, None)
+            data["sources"].pop(cls.name, None)
         write_niche(path, data)
 
-    def _origin_spec_or_404(name: str) -> dict:
-        spec = ORIGIN_SPEC.get(name)
-        if spec is None:
-            raise HTTPException(404, f"{name!r} is not a dynamic source")
-        return spec
+    def _origin_source_or_404(name: str):
+        if name not in available_sources():
+            raise HTTPException(404, f"unknown source {name!r}")
+        cls = _origin_source(name)
+        if cls is None:
+            raise HTTPException(404, f"{name!r} doesn't take user-added origins")
+        return cls
 
-    def _parse_origin_or_422(name: str, url: str | None) -> str:
+    def _parse_origin_or_422(cls, url: str | None) -> str:
         if not url or not url.strip():
             raise HTTPException(422, "url is required")
-        value = _parse_origin(name, url)
+        value = cls.parse_origin(url)
         if not value:
-            raise HTTPException(422, f"could not parse a {name} origin from {url!r}")
+            raise HTTPException(422, f"could not parse a {cls.name} origin from {url!r}")
         return value
 
-    def _origin_count(name: str, spec: dict) -> int:
-        """Total origins saved for a dynamic source across all niches."""
+    def _origin_count(cls) -> int:
+        """Total origins saved for a source across all niches."""
         return sum(
-            len(scfg.get(spec["key"]) or [])
+            len(scfg.get(cls.origin_key) or [])
             for n in niches()
             for sname, scfg in n.sources.items()
-            if sname == name
+            if sname == cls.name
         )
 
     @app.post("/api/sources/{name}/origins")
     def add_origin(name: str, body: OriginIn):
-        spec = _origin_spec_or_404(name)
-        value = _parse_origin_or_422(name, body.url)
-        cap = _max_origins(name)
-        if _origin_count(name, spec) >= cap:
-            raise HTTPException(422, f"{name} is capped at {cap} origins")
-        _origin_add(body.niche, name, spec, value)
+        cls = _origin_source_or_404(name)
+        value = _parse_origin_or_422(cls, body.url)
+        if _origin_count(cls) >= cls.max_origins:
+            raise HTTPException(422, f"{name} is capped at {cls.max_origins} origins")
+        _origin_add(body.niche, cls, value)
         return {
             "name": name,
             "niche": body.niche,
             "value": value,
-            "display": _origin_display(name, value),
+            "display": cls.origin_display(value),
         }
 
     @app.put("/api/sources/{name}/origins")
     def update_origin(name: str, body: OriginEditIn):
         """Edit a saved origin: re-parse the new url and (optionally) move niches."""
-        spec = _origin_spec_or_404(name)
+        cls = _origin_source_or_404(name)
         if not body.value:
             raise HTTPException(422, "value (the origin being edited) is required")
-        new_value = _parse_origin_or_422(name, body.url)
+        new_value = _parse_origin_or_422(cls, body.url)
         target = body.new_niche or body.niche
-        _origin_remove(body.niche, name, spec, body.value)
-        _origin_add(target, name, spec, new_value)
+        _origin_remove(body.niche, cls, body.value)
+        _origin_add(target, cls, new_value)
         return {
             "name": name,
             "niche": target,
             "value": new_value,
-            "display": _origin_display(name, new_value),
+            "display": cls.origin_display(new_value),
         }
 
     @app.delete("/api/sources/{name}/origins")
     def remove_origin(name: str, body: OriginIn):
-        spec = _origin_spec_or_404(name)
+        cls = _origin_source_or_404(name)
         if not body.value:
             raise HTTPException(422, "value is required")
-        _origin_remove(body.niche, name, spec, body.value)
+        _origin_remove(body.niche, cls, body.value)
         return {"name": name, "niche": body.niche, "removed": body.value}
 
     # ---- per-workspace AI config (text); source/AI keys stay global ---------
@@ -1266,6 +1430,27 @@ def create_app(
             for env in WORKSPACE_KEY_ENVS
         }
 
+    @app.get("/api/ai/providers")
+    def ai_providers():
+        """The selectable text providers (``ai.text.PROVIDERS``), in order."""
+        return [{"id": pid, **spec} for pid, spec in AI_PROVIDERS.items()]
+
+    def _ai_text_error(text: dict) -> str | None:
+        from opensocial.ai.text import canonical_provider, missing_fields
+
+        pid = canonical_provider(text.get("provider"))
+        spec = AI_PROVIDERS.get(pid)
+        if spec is None:
+            return f"unknown provider {text.get('provider')!r}"
+        missing = missing_fields(pid, text)
+        if missing:
+            return f"{', '.join(missing)} is required for the {spec['label']} provider"
+        if spec.get("endpoint_required") and not (text.get("endpoint") or "").strip():
+            return f"endpoint is required for the {pid} provider"
+        if spec.get("model_required") and not (text.get("model") or "").strip():
+            return f"a model id is required for the {pid} provider"
+        return None
+
     @app.get("/api/ai")
     def get_ai(account: str | None = None):
         with session_factory() as s:
@@ -1277,13 +1462,89 @@ def create_app(
 
     @app.put("/api/ai")
     def put_ai(body: AiConfigIn, account: str | None = None):
-        text = body.text or {}
-        if (text.get("provider") or "").lower() == "local" and not (text.get("endpoint") or "").strip():
-            raise HTTPException(422, "endpoint is required for the local provider")
+        from opensocial.ai.text import canonical_provider, clean_field
+
+        text = dict(body.text or {})
+        error = _ai_text_error(text)
+        if error:
+            raise HTTPException(422, error)
+        # Store provider fields cleaned (an account id pasted as a URL → the id).
+        spec = AI_PROVIDERS.get(canonical_provider(text.get("provider"))) or {}
+        for f in spec.get("fields", []):
+            text[f["key"]] = clean_field(f["key"], text.get(f["key"]))
         with session_factory() as s:
             saved = save_ai_config(s, {"text": text}, account)
             saved["key_status"] = _ai_key_status(s, account)
         return saved
+
+    @app.post("/api/ai/test")
+    def test_ai(body: AiConfigIn, account: str | None = None):
+        """Send a tiny prompt through the text provider and report the outcome.
+
+        Tests the form's current (possibly unsaved) values, resolving the API key
+        exactly as generation does: the workspace's stored key, else the env var.
+        Always answers 200 with ``ok`` so the dashboard can show the error inline.
+        """
+        import time
+
+        from opensocial.ai.text import (
+            PROVIDER_KEY_ENV,
+            TextProviderError,
+            canonical_provider,
+            get_text_provider,
+            key_required,
+            qualify_model,
+        )
+        from opensocial.core.settings import get_scoped_secret
+
+        text = dict(body.text or {})
+        provider_name = canonical_provider(text.get("provider"))
+        error = _ai_text_error(text)
+        if error:
+            return {"ok": False, "error": error}
+
+        env = PROVIDER_KEY_ENV.get(provider_name)
+        if env:
+            with session_factory() as s:
+                key = get_scoped_secret(s, account, env) or os.environ.get(env)
+            if key:
+                text["api_key"] = key
+            elif key_required(provider_name):
+                return {"ok": False, "error": f"no API key set ({env})"}
+        if text.get("model"):
+            text["model"] = qualify_model(provider_name, text["model"])
+        # Keep the probe cheap and bounded regardless of the saved settings.
+        text["max_tokens"] = 16
+        try:
+            provider = get_text_provider({"ai": {"text": text}})
+        except TextProviderError as exc:
+            return {"ok": False, "error": str(exc)}
+        if hasattr(provider, "params"):
+            provider.params["timeout"] = 20
+
+        started = time.monotonic()
+        try:
+            reply = provider.generate(
+                "You are a connectivity check. Reply with the single word: OK",
+                "ping",
+            )
+        except Exception as exc:  # any provider/network failure is the answer
+            msg = (str(exc).strip().splitlines() or [type(exc).__name__])[0][:300]
+            if "LLM Provider NOT provided" in str(exc):
+                msg = (
+                    f"model {text.get('model')!r} has no provider prefix — use e.g. "
+                    "'ollama/<model>' for Ollama or 'openai/<model>' for an "
+                    "OpenAI-compatible server"
+                )
+            elif provider_name == "local" and "404" in str(exc) and not text.get("endpoint", "").rstrip("/").endswith("/v1"):
+                msg += " — OpenAI-compatible servers usually need '/v1' on the endpoint"
+            return {"ok": False, "error": msg}
+        return {
+            "ok": True,
+            "model": getattr(provider, "name", provider_name),
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "reply": (reply or "").strip()[:120],
+        }
 
     # ---- commands --------------------------------------------------------------------
 
@@ -1383,6 +1644,38 @@ def create_app(
                 set_app_setting(s, f"secret:{body.key}", blob.decode("ascii"))
                 os.environ[body.key] = body.value.strip()
         return {"key": body.key, "set": True}
+
+    @app.delete("/api/credentials")
+    def delete_credential(key: str, account: str | None = None):
+        """Remove a stored credential (per workspace with ``account``, else global).
+
+        A global key is also dropped from the process env when it was the stored
+        value that put it there; an operator-set env var is left alone.
+        """
+        from opensocial.core.db import AppSetting
+        from opensocial.core.secrets import SecretsError, decrypt_credentials
+
+        if key not in ALLOWED_SECRET_ENVS:
+            raise HTTPException(422, f"unknown credential key {key!r}")
+        setting = f"ws:{account}:secret:{key}" if account else f"secret:{key}"
+        with session_factory() as s:
+            row = s.get(AppSetting, setting)
+            if row is not None:
+                if not account:
+                    try:
+                        stored = decrypt_credentials(
+                            row.value.encode("ascii"), resolve_settings(s).secret_key
+                        ).get("value")
+                    except SecretsError:
+                        stored = None
+                    if stored and os.environ.get(key) == stored:
+                        os.environ.pop(key, None)
+                s.delete(row)
+                s.commit()
+            still_set = (
+                has_scoped_secret(s, account, key) if account else False
+            ) or bool(os.environ.get(key))
+        return {"key": key, "removed": row is not None, "set": still_set}
 
     @app.post("/api/credentials/x")
     def set_x_account(body: XAccountIn):

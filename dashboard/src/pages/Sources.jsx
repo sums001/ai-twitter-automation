@@ -4,114 +4,23 @@ import { useApp } from '../AppContext';
 import { NICHE_COLOR, nicheLabel } from '../data';
 import { api, usePoll } from '../api';
 import { ago } from '../utils';
-import { Card, Toggle, SectionLabel } from '../components/common';
+import { Button, Card, FilterChip, Loading, SectionLabel, Segmented, Stat, Tag, Toggle, fieldStyle } from '../components/common';
 
 const LABEL_W = 250;
 
-const inputStyle = {
-  width: '100%', colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 8,
-  color: '#e7eaef', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, padding: '8px 10px',
-};
+const inputStyle = { ...fieldStyle, width: '100%', padding: '8px 10px' };
 const block = { background: '#0d1116', border: '1px solid #171c24', borderRadius: 11, padding: '14px 16px' };
 
-// Mirrors the backend's ORIGIN_SPEC keys; used to classify dynamic sources if
-// the running service is too old to send the `kind` field.
-const DYNAMIC_IDS = ['rss', 'reddit', 'youtube'];
-const MAX_ORIGINS = 20; // fallback if the service doesn't send max_origins
-
-// How each source turns its input into post drafts — surfaced via the ⓘ button.
-// `input` = what you provide · `scans` = what it fetches · `builds` = how posts
-// are made. Static sources run on each niche's own config; dynamic ones you feed.
-const SOURCE_INFO = {
-  reddit: {
-    input: 'You add subreddits (paste a URL or just r/name).',
-    scans: "Reads each subreddit's hot posts — title, self-text, score & comment counts.",
-    builds: 'High-signal threads are written up into post drafts.',
-  },
-  youtube: {
-    input: 'You add channels (a /channel/UC… URL works best).',
-    scans: 'Lists each channel’s newest uploads, then pulls the full video transcript + view/like stats.',
-    builds: 'The transcript is summarized into post drafts about the video.',
-  },
-  rss: {
-    input: 'You add RSS / Atom feed URLs.',
-    scans: 'Reads each feed’s newest entries — title plus summary/content.',
-    builds: 'Fresh articles become post drafts.',
-  },
-  hackernews: {
-    input: 'Runs automatically on each niche’s keywords (no setup).',
-    scans: 'Searches Hacker News (Algolia) for matching or front-page stories with discussion.',
-    builds: 'Top stories become drafts.',
-  },
-  googlenews: {
-    input: 'Runs on each niche’s search query.',
-    scans: 'Reads Google News search RSS for recent headlines and the outlet.',
-    builds: 'Recent news becomes drafts.',
-  },
-  arxiv: {
-    input: 'Runs on each niche’s arXiv query (categories like cs.AI).',
-    scans: 'Fetches recent papers — title and abstract.',
-    builds: 'New papers become drafts.',
-  },
-  nasa: {
-    input: 'No setup needed.',
-    scans: 'Pulls recent Astronomy Picture of the Day entries with their imagery.',
-    builds: 'Each APOD becomes an image-led draft.',
-  },
-  guardian: {
-    input: 'Runs on each niche’s section / query.',
-    scans: 'Queries The Guardian Content API for recent articles.',
-    builds: 'Articles become drafts.',
-  },
-  medium: {
-    input: 'Runs on each niche’s Medium tags.',
-    scans: 'Reads Medium tag RSS feeds — title and summary.',
-    builds: 'Recent posts become drafts.',
-  },
-  devto: {
-    input: 'Runs on each niche’s dev.to tag.',
-    scans: 'Reads the Forem API for recent articles (optionally the full body).',
-    builds: 'Articles become drafts.',
-  },
-  github_releases: {
-    input: 'Tracks each niche’s repos (owner/repo).',
-    scans: 'Reads each repo’s latest releases — tag and release notes.',
-    builds: 'New releases become drafts.',
-  },
-  producthunt: {
-    input: 'No origin setup needed.',
-    scans: 'Pulls trending products from Product Hunt (GraphQL API).',
-    builds: 'Each launch becomes a draft.',
-  },
-  yfinance: {
-    input: 'Tracks each niche’s symbols (AAPL, BTC-USD…).',
-    scans: 'Pulls Yahoo Finance news for every tracked symbol.',
-    builds: 'Market news becomes drafts.',
-  },
-};
-
-const KEY_NOTE = {
-  reddit: 'Needs a Reddit app client id + secret.',
-  youtube: 'Needs a YouTube Data API key.',
-  guardian: 'Needs a free Guardian API key.',
-  producthunt: 'Needs a Product Hunt developer token.',
-  github_releases: 'Optional GitHub token raises rate limits.',
-  nasa: 'Optional NASA key (else the shared DEMO_KEY rate-limits).',
-};
+// Fallback cap if the service doesn't send max_origins.
+const MAX_ORIGINS = 20;
 
 // ===========================================================================
 // "how it works" popover (anchored under the ⓘ button)
 // ===========================================================================
 function InfoPopover({ src }) {
   const [open, setOpen] = useState(false);
-  const info = SOURCE_INFO[src.id];
-  if (!info) return null;
-  const step = (label, text, color) => (
-    <div style={{ display: 'flex', gap: 9 }}>
-      <span className="os-mono" style={{ width: 44, flexShrink: 0, fontSize: 8.5, fontWeight: 700, color, letterSpacing: '.4px', paddingTop: 2 }}>{label}</span>
-      <span style={{ fontSize: 11.5, color: '#cfd6df', lineHeight: 1.5 }}>{text}</span>
-    </div>
-  );
+  if (!src.description) return null;
+  const settings = src.settings || [];
   return (
     <span style={{ position: 'relative', display: 'inline-flex' }}>
       <button
@@ -134,14 +43,21 @@ function InfoPopover({ src }) {
               <span style={{ display: 'inline-flex', color: '#3ecf8e' }}><Cog size={14} /></span>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: '#fff' }}>How {src.name} works</span>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-              {step('INPUT', info.input, '#7aa2f7')}
-              {step('SCANS', info.scans, '#f5a524')}
-              {step('BUILDS', info.builds, '#3ecf8e')}
-            </div>
-            {src.key && KEY_NOTE[src.id] && (
-              <div className="os-mono" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 9.5, color: '#9aa3af', marginTop: 12, paddingTop: 10, borderTop: '1px solid #232b35' }}>
-                <KeyRound size={12} style={{ flexShrink: 0 }} />{KEY_NOTE[src.id]}
+            <div style={{ fontSize: 11.5, color: '#cfd6df', lineHeight: 1.5 }}>{src.description}</div>
+            {settings.length > 0 && (
+              <div style={{ marginTop: 11 }}>
+                <div className="os-mono" style={{ fontSize: 8.5, fontWeight: 700, color: '#7aa2f7', letterSpacing: '.4px', marginBottom: 5 }}>PER-NICHE SETTINGS</div>
+                {settings.map((st) => (
+                  <div key={st.name} style={{ display: 'flex', gap: 8, fontSize: 10.5, lineHeight: 1.5 }}>
+                    <span className="os-mono" style={{ width: 92, flexShrink: 0, color: '#e7eaef' }}>{st.name}</span>
+                    <span style={{ color: '#9aa3af' }}>{st.help}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {src.key_help && (
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, fontSize: 10.5, color: '#9aa3af', lineHeight: 1.5, marginTop: 12, paddingTop: 10, borderTop: '1px solid #232b35' }}>
+                <KeyRound size={12} style={{ flexShrink: 0, marginTop: 2 }} />{src.key_help}
               </div>
             )}
           </div>
@@ -156,12 +72,12 @@ const envLabel = (env) =>
   env.replace(/_API_KEY$|_TOKEN$/i, '').replace(/^[A-Z]+_/, '').replace(/_/g, ' ').toLowerCase() ||
   env.toLowerCase();
 
-function keyBadgeFor(src) {
-  if (!src.key) return { text: 'no key needed', style: { background: '#161b22', color: '#5b6470', fontWeight: 400 } };
-  if (src.key_set) return { text: 'key set ✓', style: { background: 'rgba(62,207,142,.12)', color: '#3ecf8e', fontWeight: 600 } };
+function KeyTag({ src }) {
+  if (!src.key) return null; // keyless is the norm, no tag needed
+  if (src.key_set) return <Tag fg="#3ecf8e" bg="rgba(62,207,142,.12)">key set</Tag>;
   return src.key === 'optional'
-    ? { text: 'key · optional', style: { background: '#161b22', color: '#9aa3af', fontWeight: 400 } }
-    : { text: 'key required', style: { background: 'rgba(245,69,92,.12)', color: '#f5455c', fontWeight: 600 } };
+    ? <Tag>key optional</Tag>
+    : <Tag fg="#f5455c" bg="rgba(245,69,92,.12)">key required</Tag>;
 }
 
 // ===========================================================================
@@ -261,13 +177,9 @@ function KeyEditor({ src, keySet, onSaved }) {
             <span className="os-mono" style={{ fontSize: 9, color: '#4b5563', flex: 1 }}>
               stored encrypted · also editable in Settings → Credentials
             </span>
-            <button
-              onClick={save}
-              className="run-btn"
-              style={{ border: 'none', cursor: canSave ? 'pointer' : 'default', fontSize: 11.5, fontWeight: 700, padding: '7px 16px', borderRadius: 8, background: canSave ? '#3ecf8e' : '#1c222b', color: canSave ? '#0a0c0f' : '#7a828f' }}
-            >
-              {busy ? 'Saving…' : done ? 'Saved ✓' : 'Save keys'}
-            </button>
+            <Button variant="primary" onClick={save} disabled={!canSave}>
+              {busy ? 'Saving…' : done ? 'Saved' : 'Save keys'}
+            </Button>
           </div>
         </div>
       )}
@@ -317,8 +229,8 @@ function OriginRow({ srcId, origin, niches, reload }) {
           onKeyDown={(e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') cancel(); }}
           style={{ ...inputStyle, flex: 1, width: 'auto', padding: '5px 8px', fontSize: 11 }}
         />
-        <button onClick={save} className="run-btn" style={{ border: 'none', background: '#3ecf8e', color: '#0a0c0f', cursor: 'pointer', fontSize: 10.5, fontWeight: 700, padding: '5px 11px', borderRadius: 6 }}>{busy ? 'saving…' : 'save'}</button>
-        <button onClick={cancel} className="os-mono hover-bright" style={{ border: 'none', background: 'transparent', color: '#7a828f', cursor: 'pointer', fontSize: 10, padding: '5px 5px' }}>cancel</button>
+        <Button size="sm" variant="primary" onClick={save}>{busy ? 'Saving…' : 'Save'}</Button>
+        <Button size="sm" variant="ghost" onClick={cancel}>Cancel</Button>
       </div>
     );
   }
@@ -375,13 +287,9 @@ function AddOrigin({ src, niches, reload, count, max }) {
             placeholder={src.origin_label || 'origin URL'}
             style={{ ...inputStyle, flex: 1, width: 'auto' }}
           />
-          <button
-            onClick={add}
-            className="run-btn"
-            style={{ border: 'none', background: ready ? '#3ecf8e' : '#1c222b', color: ready ? '#0a0c0f' : '#7a828f', cursor: ready ? 'pointer' : 'default', fontSize: 12, fontWeight: 700, padding: '8px 16px', borderRadius: 8, whiteSpace: 'nowrap' }}
-          >
-            {busy ? 'adding…' : '+ Add'}
-          </button>
+          <Button variant="primary" onClick={add} disabled={!ready || busy}>
+            {busy ? 'Adding…' : 'Add'}
+          </Button>
         </div>
       )}
     </div>
@@ -392,7 +300,6 @@ function AddOrigin({ src, niches, reload, count, max }) {
 // collapsed source row
 // ===========================================================================
 function SourceRow({ src, open, onToggle, onFetch, onToggleEnabled, fetching }) {
-  const badge = keyBadgeFor(src);
   const upcoming = src.upcoming;
   const dot = !src.enabled ? '#3b414b' : src.ok ? '#3ecf8e' : '#f5a524';
   const isDynamic = src.kind === 'dynamic';
@@ -413,13 +320,11 @@ function SourceRow({ src, open, onToggle, onFetch, onToggleEnabled, fetching }) 
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             <span style={{ fontSize: 13, fontWeight: open ? 700 : 600, color: open ? '#fff' : '#e7eaef', whiteSpace: 'nowrap' }}>{src.name}</span>
-            {upcoming && (
-              <span className="os-mono" style={{ fontSize: 8.5, padding: '2px 6px', borderRadius: 5, background: 'rgba(99,102,241,.14)', color: '#a5b4fc', fontWeight: 600, letterSpacing: '.04em' }}>UPCOMING</span>
-            )}
-            <span className="os-mono" style={{ fontSize: 8.5, padding: '2px 6px', borderRadius: 5, ...badge.style }}>{badge.text}</span>
+            {upcoming && <Tag fg="#a5b4fc" bg="rgba(99,102,241,.14)">upcoming</Tag>}
+            <KeyTag src={src} />
           </div>
-          <div className="os-mono" style={{ fontSize: 9, color: '#5b6470', marginTop: 2 }}>
-            {isDynamic ? 'dynamic' : 'static'}{src.category ? ` · ${src.category}` : ''}
+          <div style={{ fontSize: 10, color: '#5b6470', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={src.description}>
+            {src.description}
           </div>
         </div>
       </div>
@@ -443,17 +348,16 @@ function SourceRow({ src, open, onToggle, onFetch, onToggleEnabled, fetching }) 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'flex-end' }} onClick={(e) => e.stopPropagation()}>
         <span className="os-mono" style={{ fontSize: 9.5, color: !src.enabled ? '#5b6470' : src.ok ? '#5b6470' : '#f5a524', whiteSpace: 'nowrap' }}>{lastInfo}</span>
         <InfoPopover src={src} />
-        <button
-          onClick={() => src.enabled && !fetching && onFetch()}
+        <Button
+          size="sm"
+          onClick={() => !fetching && onFetch()}
           disabled={!src.enabled}
-          className={src.enabled ? 'hover-border-text' : undefined}
-          title={upcoming ? 'coming soon — not available yet' : src.enabled ? 'fetch this source now' : 'source is disabled — enable it first ↑'}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 5, border: '1px solid #232932', background: 'transparent', color: !src.enabled ? '#3b414b' : fetching ? '#5b6470' : '#9aa3af', cursor: src.enabled ? 'pointer' : 'not-allowed', fontFamily: "'JetBrains Mono', monospace", fontSize: 10, padding: '6px 11px', borderRadius: 7, whiteSpace: 'nowrap' }}
+          title={upcoming ? 'coming soon, not available yet' : src.enabled ? 'fetch this source now' : 'enable the source first'}
+          icon={<RefreshCw size={11} style={fetching ? { animation: 'os-spin 1s linear infinite' } : undefined} />}
         >
-          <RefreshCw size={11} style={fetching ? { animation: 'os-spin 1s linear infinite' } : undefined} />
-          {fetching ? 'fetching…' : 'fetch'}
-        </button>
-        <Toggle on={src.enabled} onClick={onToggleEnabled} size={20} disabled={upcoming} title={upcoming ? 'coming soon — can’t be enabled yet' : 'enable / disable globally'} />
+          {fetching ? 'Fetching…' : 'Fetch'}
+        </Button>
+        <Toggle on={src.enabled} onClick={onToggleEnabled} disabled={upcoming} title={upcoming ? 'coming soon — can’t be enabled yet' : 'enable / disable globally'} />
       </div>
     </div>
   );
@@ -498,11 +402,11 @@ function SourceEditor({ src, niches, keySet, reload, reloadCreds }) {
             </>
           ) : (
             <>
-              <SectionLabel style={{ fontSize: 10, marginBottom: 10 }}>FEEDS NICHES</SectionLabel>
+              <SectionLabel style={{ fontSize: 10, marginBottom: 10 }}>USED BY NICHES</SectionLabel>
               <NicheChips niches={uniqueNiches} max={50} />
               <div className="os-mono" style={{ fontSize: 9.5, color: '#4b5563', marginTop: 12, lineHeight: 1.6 }}>
-                A static source has a fixed origin and runs for every niche that references it.
-                Niches reference it from Settings → Niches → Sources.
+                Runs for every niche that lists it, using that niche's own settings
+                (see ⓘ for what each setting does).
               </div>
             </>
           )}
@@ -531,7 +435,7 @@ export default function Sources() {
   const { data: creds, reload: reloadCreds } = usePoll('/api/credentials', 30000);
 
   const [open, setOpen] = useState(null);
-  const [filter, setFilter] = useState('all'); // all | static | dynamic
+  const [filter, setFilter] = useState('all'); // all | free | keyed
   const [query, setQuery] = useState('');
   const [selectedOnly, setSelectedOnly] = useState(true); // hide sources that don't support a selected niche
 
@@ -554,9 +458,10 @@ export default function Sources() {
     return m;
   }, [creds]);
 
-  const isDynamic = (s) => (s.kind ? s.kind === 'dynamic' : DYNAMIC_IDS.includes(s.id));
-  // normalize kind so downstream uses src.kind reliably
-  const normalized = list.map((s) => ({ ...s, kind: isDynamic(s) ? 'dynamic' : 'static' }));
+  const normalized = list;
+  // "free" = fetches without a key (an optional key only lifts rate limits).
+  const needsKeyGroup = (s) => s.auth === 'required';
+  const inFilter = (s) => filter === 'all' || (filter === 'keyed' ? needsKeyGroup(s) : !needsKeyGroup(s));
 
   const fetchingId = (id) =>
     commands.find((c) => c.type === 'fetch_sources' && c.payload.source === id && (c.status === 'pending' || c.status === 'running'));
@@ -568,7 +473,7 @@ export default function Sources() {
   // otherwise a fresh DB (nothing selected) would hide every static source.
   const applySelected = selectedOnly && selectedSet.size > 0;
   const visible = normalized
-    .filter((s) => filter === 'all' || s.kind === filter)
+    .filter(inFilter)
     .filter((s) => !applySelected || supportsSelected(s))
     .filter((s) => !query || s.name.toLowerCase().includes(query.toLowerCase()) || s.id.toLowerCase().includes(query.toLowerCase()));
   const hiddenBySelected = applySelected
@@ -578,30 +483,15 @@ export default function Sources() {
   const total = normalized.length;
   const active = normalized.filter((s) => s.enabled).length;
   const originsTotal = normalized.reduce((a, s) => a + (s.origins || []).length, 0);
-  const missingKeys = normalized.filter((s) => s.key === 'required' && !s.key_set && !s.upcoming).length;
-
-  const seg = (id, label, count) => (
-    <button
-      key={id}
-      onClick={() => setFilter(id)}
-      className={filter === id ? '' : 'hover-bright'}
-      style={{
-        border: 'none', cursor: 'pointer', fontSize: 11.5, fontWeight: 600, padding: '6px 13px', borderRadius: 7,
-        background: filter === id ? '#1c222b' : 'transparent', color: filter === id ? '#e7eaef' : '#7a828f',
-        fontFamily: 'inherit',
-      }}
-    >
-      {label} <span className="os-mono" style={{ fontSize: 9.5, color: filter === id ? '#5b6470' : '#444b55' }}>{count}</span>
-    </button>
-  );
+  const missingKeys = normalized.filter((s) => s.needs_key && !s.upcoming).length;
 
   return (
-    <Card style={{ padding: '4px 20px 8px' }}>
+    <Card style={{ padding: '0 18px 8px' }}>
       {/* ===== summary header ===== */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 22, flexWrap: 'wrap', padding: '16px 0', borderBottom: '1px solid #1a1f27' }}>
         <div>
-          <div style={{ fontSize: 15, fontWeight: 700 }}>Content sources</div>
-          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 2 }}>static &amp; dynamic ingestion · click a row to configure</div>
+          <div style={{ fontSize: 13.5, fontWeight: 600 }}>Content sources</div>
+          <div className="os-mono" style={{ fontSize: 10, color: '#5b6470', marginTop: 3 }}>shared by every workspace · click a row to configure</div>
         </div>
         <div style={{ display: 'flex', gap: 26, marginLeft: 4 }}>
           <Stat value={active} label={`active / ${total}`} color="#e7eaef" />
@@ -621,42 +511,39 @@ export default function Sources() {
       {/* ===== controls + list ===== */}
       <div style={{ paddingTop: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', gap: 2, background: '#0d1116', border: '1px solid #1a1f27', borderRadius: 9, padding: 3 }}>
-            {seg('all', 'All', total)}
-            {seg('static', 'Static', normalized.filter((s) => s.kind === 'static').length)}
-            {seg('dynamic', 'Dynamic', normalized.filter((s) => s.kind === 'dynamic').length)}
-          </div>
+          <Segmented
+            options={[
+              ['all', 'All', total],
+              ['free', 'No key needed', normalized.filter((s) => !needsKeyGroup(s)).length],
+              ['keyed', 'Needs a key', normalized.filter(needsKeyGroup).length],
+            ]}
+            value={filter}
+            onChange={setFilter}
+          />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Filter sources…"
-            style={{ width: 170, colorScheme: 'dark', background: '#0d1116', border: '1px solid #1c212a', borderRadius: 8, color: '#e7eaef', fontFamily: 'inherit', fontSize: 11.5, padding: '7px 11px' }}
+            style={{ ...fieldStyle, width: 170, fontFamily: 'inherit', padding: '7px 11px' }}
           />
-          <button
+          <FilterChip
+            active={selectedOnly}
             onClick={() => setSelectedOnly((v) => !v)}
-            className={selectedOnly ? '' : 'hover-bright'}
+            icon={<Star size={12} style={{ flexShrink: 0 }} />}
             title="show only sources that support a selected niche (dynamic sources always shown)"
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontSize: 11.5, fontWeight: 600,
-              fontFamily: 'inherit', padding: '6px 12px', borderRadius: 8,
-              border: `1px solid ${selectedOnly ? 'rgba(62,207,142,.35)' : '#1c212a'}`,
-              background: selectedOnly ? 'rgba(62,207,142,.1)' : '#0d1116',
-              color: selectedOnly ? '#3ecf8e' : '#7a828f',
-            }}
           >
-            <Star size={12} style={{ flexShrink: 0 }} />
             Selected niches only
-          </button>
+          </FilterChip>
           <span className="os-mono" style={{ marginLeft: 'auto', fontSize: 10, color: '#5b6470' }}>
             {selectedOnly && selectedSet.size === 0
-              ? 'no niches selected — showing all sources'
+              ? 'no niches selected · showing all sources'
               : hiddenBySelected > 0
-                ? `${hiddenBySelected} source${hiddenBySelected > 1 ? 's' : ''} hidden — not in a selected niche`
-                : missingKeys > 0 ? `${missingKeys} source${missingKeys > 1 ? 's' : ''} need a key — set it inline ↓` : 'click any row to edit it inline ↓'}
+                ? `${hiddenBySelected} source${hiddenBySelected > 1 ? 's' : ''} hidden · not in a selected niche`
+                : missingKeys > 0 ? `${missingKeys} source${missingKeys > 1 ? 's' : ''} need a key` : `${visible.length} source${visible.length === 1 ? '' : 's'}`}
           </span>
         </div>
 
-        {!sources && <div className="os-mono" style={{ fontSize: 11, color: '#5b6470', padding: '24px 0', textAlign: 'center' }}>loading sources…</div>}
+        {!sources && <Loading>loading sources…</Loading>}
 
         {sources && visible.length === 0 && (
           <div className="os-mono" style={{ fontSize: 11, color: '#5b6470', padding: '28px 0', textAlign: 'center' }}>no sources match this filter</div>
@@ -682,14 +569,5 @@ export default function Sources() {
         })}
       </div>
     </Card>
-  );
-}
-
-function Stat({ value, label, color }) {
-  return (
-    <div>
-      <div className="os-mono" style={{ fontSize: 20, fontWeight: 700, color, lineHeight: 1 }}>{value}</div>
-      <div className="os-mono" style={{ fontSize: 9, color: '#5b6470', marginTop: 4 }}>{label}</div>
-    </div>
   );
 }
